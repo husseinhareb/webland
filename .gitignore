@@ -1,0 +1,18 @@
+# Rust
+/backend/target/
+**/*.rs.bk
+
+# Node
+node_modules/
+/frontend/dist/
+*.tsbuildinfo
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local env
+.env
+.env.local
