@@ -1,0 +1,8 @@
+# Trunk builds the Leptos frontend to WebAssembly and serves it in development.
+[build]
+target = "index.html"
+
+[serve]
+# Localhost only until the protocol has authentication (see docs/roadmap.md).
+address = "127.0.0.1"
+port = 3000

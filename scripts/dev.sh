@@ -5,5 +5,5 @@ cd "$(dirname "$0")/.."
 
 trap 'kill 0' EXIT
 cargo run --manifest-path backend/Cargo.toml -p webland-server &
-npm --prefix frontend run dev &
+(cd frontend && trunk serve) &
 wait

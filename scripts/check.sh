@@ -7,5 +7,6 @@ cargo fmt --manifest-path backend/Cargo.toml --all --check
 cargo clippy --manifest-path backend/Cargo.toml --workspace --all-targets -- -D warnings
 cargo test --manifest-path backend/Cargo.toml --workspace
 
-npm --prefix frontend run check
-npm --prefix frontend run build
+cargo fmt --manifest-path frontend/Cargo.toml --all --check
+cargo clippy --manifest-path frontend/Cargo.toml --target wasm32-unknown-unknown --all-targets -- -D warnings
+(cd frontend && trunk build)

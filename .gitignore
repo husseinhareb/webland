@@ -1,11 +1,10 @@
 # Rust
 /backend/target/
+/frontend/target/
 **/*.rs.bk
 
-# Node
-node_modules/
+# Trunk
 /frontend/dist/
-*.tsbuildinfo
 
 # Editors / OS
 .DS_Store
@@ -16,3 +15,6 @@ node_modules/
 # Local env
 .env
 .env.local
+
+# Local docs
+docs/

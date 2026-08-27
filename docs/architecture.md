@@ -7,8 +7,8 @@ webland-compositor   (Rust, smithay)
     ↓
 webland-server       (Rust, hosts the compositor, speaks the protocol)
     ↓ Webland protocol (WebSocket first, WebTransport later)
-frontend             (TypeScript, Preact)
-    ↓ WebGPU / WebAssembly
+frontend             (Rust, Leptos → WebAssembly)
+    ↓ WebGPU
 user's display
 ```
 
@@ -29,16 +29,24 @@ user's display
 | `compositor/` | Places application surfaces in the desktop scene |
 | `gpu/` | WebGPU device and render pipelines |
 | `protocol/` | Transport seam and codec |
-| `wasm/` | Future performance-critical modules |
+| `wasm/` | Notes on hand-tuned WebAssembly beyond what Leptos already emits |
 
 ## Decisions
+
+The reasoning behind these, and the order they get built in, is in
+[roadmap.md](roadmap.md).
 
 - **Wayland only.** Xorg is not a target. X11 clients would arrive via XWayland
   behind a feature flag, if ever.
 - **Transport is replaceable.** The protocol is defined over framed binary
   messages; WebSocket is an implementation detail, not part of the contract.
-- **The frontend is TypeScript.** WebAssembly is reserved for parts that
-  profiling shows need it, rather than being the starting point.
+- **The frontend is Rust + Leptos**, compiled to WebAssembly with Trunk. The
+  whole frontend is WASM, so `webland-protocol` is a shared crate used verbatim
+  on both sides and the wire format cannot drift. Leptos is chosen over a
+  TypeScript framework for that single-sourcing, not for raw speed: the hot path
+  (WebCodecs decode → WebGPU texture → composite) is browser-native and the same
+  in any language. The cost is more `web-sys`/`wasm-bindgen` boilerplate around
+  the newest browser APIs, accepted deliberately.
 - **`smithay` for the compositor**, pulled in with default features off so the
   skeleton builds without DRM/libinput/udev system libraries. Backend features
   get enabled when a real backend is written.

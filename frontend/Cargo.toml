@@ -1,0 +1,29 @@
+# Standalone crate (own workspace) so it builds for wasm32 independently of the
+# backend workspace while still sharing the protocol crate by path.
+[workspace]
+
+[package]
+name = "webland-frontend"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/husseinhareb/webland"
+publish = false
+
+[dependencies]
+# The wire format, shared verbatim with the backend. One codec, no drift.
+webland-protocol = { path = "../backend/crates/webland-protocol" }
+
+leptos = { version = "0.7", features = ["csr"] }
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
+
+[dependencies.web-sys]
+version = "0.3"
+# Widened as the frontend reaches for WebSocket, WebCodecs and WebGPU.
+features = ["Window", "Document"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
