@@ -7,7 +7,12 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-smithay = { version = "0.7.0", default-features = false, features = ["wayland_frontend", "desktop"] }
+# backend_winit pulls in backend_egl + renderer_gl; enough to render into a
+# window on the host desktop (Phase 1). No DRM/udev/libseat backend yet.
+smithay = { version = "0.7.0", default-features = false, features = ["backend_winit", "renderer_gl", "wayland_frontend", "desktop"] }
+webland-core.workspace = true
+webland-protocol.workspace = true
+tracing = "0.1.44"
 
 [lints]
 workspace = true
