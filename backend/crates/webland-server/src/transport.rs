@@ -16,7 +16,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
-use webland_protocol::{ClientMessage, InputEvent, ServerMessage, decode, encode};
+use webland_protocol::{ClientMessage, ServerMessage, decode, encode};
 
 /// How many frames may be in flight to a browser before it must ack. Small, so
 /// latency stays low; >1 so the pipeline does not stall on a single round trip.
@@ -136,8 +136,9 @@ pub async fn bind(addr: SocketAddr) -> std::io::Result<TcpListener> {
 pub async fn accept(
     listener: &TcpListener,
 ) -> Result<Connection, Box<dyn std::error::Error + Send + Sync>> {
-    let (stream, _peer) = listener.accept().await?;
+    let (stream, peer) = listener.accept().await?;
     let ws = tokio_tungstenite::accept_async(stream).await?;
+    tracing::info!(%peer, "browser connected");
     let (mut writer, mut reader) = ws.split();
 
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<ServerMessage>();
@@ -180,9 +181,14 @@ pub async fn accept(
 /// Run a WebSocket server on a background thread.
 ///
 /// Each connected browser receives every frame the compositor pushes into
-/// `sink`, and its input is logged (routed to the compositor in Phase 3).
+/// `sink`, and everything it sends back — input, and the frame acks that pace
+/// `wl_surface.frame` (Decision 3) — is forwarded to the compositor on `client`.
 /// Enabled via the `WEBLAND_WS` env var so it never interferes with the window.
-pub fn spawn_server(addr: SocketAddr, sink: FrameSink, input: mpsc::UnboundedSender<InputEvent>) {
+pub fn spawn_server(
+    addr: SocketAddr,
+    sink: FrameSink,
+    client: mpsc::UnboundedSender<ClientMessage>,
+) {
     let spawned = std::thread::Builder::new()
         .name("webland-ws".to_owned())
         .spawn(move || {
@@ -211,21 +217,25 @@ pub fn spawn_server(addr: SocketAddr, sink: FrameSink, input: mpsc::UnboundedSen
                     match accept(&listener).await {
                         Ok(mut connection) => {
                             let mut frames = sink.subscribe();
-                            let input_tx = input.clone();
+                            let client_tx = client.clone();
                             tokio::spawn(async move {
                                 let mut pacer = Pacer::new();
                                 loop {
                                     tokio::select! {
-                                        input = connection.recv() => match input {
+                                        incoming = connection.recv() => match incoming {
+                                            // The ack both releases a withheld
+                                            // frame here and credits the
+                                            // compositor's frame clock.
                                             Some(ClientMessage::FramePresented) => {
+                                                let _ = client_tx.send(ClientMessage::FramePresented);
                                                 if let Some(frame) = pacer.on_ack()
                                                     && !connection.send(frame)
                                                 {
                                                     break;
                                                 }
                                             }
-                                            Some(ClientMessage::Input(event)) => {
-                                                let _ = input_tx.send(event);
+                                            Some(message) => {
+                                                let _ = client_tx.send(message);
                                             }
                                             None => break,
                                         },
@@ -242,6 +252,7 @@ pub fn spawn_server(addr: SocketAddr, sink: FrameSink, input: mpsc::UnboundedSen
                                         },
                                     }
                                 }
+                                tracing::info!("browser disconnected");
                             });
                         }
                         Err(err) => tracing::warn!(%err, "websocket accept failed"),

@@ -17,8 +17,11 @@ webland-core = { path = "../backend/crates/webland-core" }
 
 leptos = { version = "0.7", features = ["csr"] }
 wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 console_error_panic_hook = "0.1"
+# WebGPU render path; falls back to the 2D canvas where WebGPU is unavailable.
+wgpu = { version = "30", default-features = false, features = ["webgpu", "wgsl"] }
 
 [dependencies.web-sys]
 version = "0.3"
@@ -28,6 +31,7 @@ features = [
     "WebSocket", "BinaryType", "MessageEvent", "Event",
     "HtmlCanvasElement", "CanvasRenderingContext2d", "ImageData",
     "PointerEvent", "MouseEvent", "KeyboardEvent",
+    "console",
 ]
 
 [profile.release]

@@ -32,7 +32,9 @@ use std::os::unix::io::OwnedFd;
 use std::sync::Arc;
 
 use webland_core::{Size, SurfaceId};
-use webland_protocol::{Codec, InputEvent, Press, ServerMessage, SurfaceCreated, SurfaceFrame};
+use webland_protocol::{
+    ClientMessage, Codec, InputEvent, Press, ServerMessage, SurfaceCreated, SurfaceFrame,
+};
 
 use smithay::backend::input::{
     ButtonState, InputEvent as BackendInputEvent, KeyState, KeyboardKeyEvent, Keycode,
@@ -116,8 +118,12 @@ impl XdgShellHandler for Webland {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        tracing::info!("new xdg toplevel mapped");
+        // Headless has no output, so clients have no size to render at and pick a
+        // small default. Tell them one, via WEBLAND_SIZE=WxH (default 1280x800).
+        let (width, height) = configured_size();
+        tracing::info!(width, height, "new xdg toplevel mapped");
         surface.with_pending_state(|state| {
+            state.size = Some((width, height).into());
             state.states.set(xdg_toplevel::State::Activated);
         });
         surface.send_configure();
@@ -259,9 +265,77 @@ fn to_key_state(press: Press) -> KeyState {
     }
 }
 
-/// Re-announce every surface roughly once a second so a browser that connects
-/// mid-stream still learns each surface's size (the broadcast has no history).
-const REANNOUNCE_EVERY: u64 = 120;
+/// How many frame callbacks may be outstanding before the browser has to catch
+/// up. >1 so a client is not stalled by a single round trip.
+const INITIAL_FRAME_CREDIT: i32 = 2;
+
+/// Fire callbacks this often even with no credit, so clients still make progress
+/// when no browser is attached (otherwise nothing ever renders, nothing is ever
+/// sent, and no ack can arrive — a deadlock).
+const IDLE_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Paces `wl_surface.frame` callbacks against the browser (Decision 3).
+///
+/// Wayland clients redraw only when the compositor fires their frame callback.
+/// Firing on the compositor's own loop rate lets a client run ahead of a browser
+/// that cannot keep up: it renders into frames the pacer then discards, and
+/// latency grows without bound. So a callback costs credit, and credit comes
+/// from the browser saying it presented.
+struct FrameClock {
+    credit: i32,
+    last_tick: std::time::Instant,
+}
+
+impl FrameClock {
+    fn new() -> Self {
+        Self {
+            credit: INITIAL_FRAME_CREDIT,
+            last_tick: std::time::Instant::now(),
+        }
+    }
+
+    /// The browser presented a frame, so one more redraw is warranted.
+    ///
+    /// Capped: a burst of acks (or a browser reconnecting) must not bank enough
+    /// credit for clients to free-run afterwards.
+    // ponytail: one ack buys one callback tick across every surface, which is
+    // exact only while there is one surface. Per-surface credit lands with the
+    // multi-surface scene (Phase 4).
+    fn on_ack(&mut self) {
+        self.credit = (self.credit + 1).min(INITIAL_FRAME_CREDIT);
+    }
+
+    /// Whether to fire frame callbacks this iteration.
+    fn should_tick(&mut self, now: std::time::Instant) -> bool {
+        if self.credit > 0 {
+            self.credit -= 1;
+            self.last_tick = now;
+            return true;
+        }
+        // No browser, or one that has gone quiet: keep clients alive slowly.
+        if now.duration_since(self.last_tick) >= IDLE_FRAME_INTERVAL {
+            self.last_tick = now;
+            return true;
+        }
+        false
+    }
+}
+
+/// Re-announce every surface roughly once a second (headless runs at ~60Hz) so
+/// a browser that connects mid-stream promptly learns each surface's size and
+/// gets a keyframe (the broadcast has no history).
+const REANNOUNCE_EVERY: u64 = 60;
+
+/// The size to ask clients to render at, from `WEBLAND_SIZE=WxH` (default 1280x800).
+fn configured_size() -> (i32, i32) {
+    std::env::var("WEBLAND_SIZE")
+        .ok()
+        .and_then(|value| {
+            let (w, h) = value.split_once('x')?;
+            Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+        })
+        .unwrap_or((1280, 800))
+}
 
 /// Copy a surface's currently-committed `wl_shm` contents into a raw frame.
 ///
@@ -307,20 +381,25 @@ fn send_frames_surface_tree(surface: &wl_surface::WlSurface, time: u32) {
     );
 }
 
-/// Drain browser input and inject it into the seat, targeting the first surface.
-fn drain_input(
+/// Drain browser messages: inject input into the seat, and credit the frame
+/// clock for every frame the browser reports presented.
+fn drain_client(
     state: &mut Webland,
-    poll_input: &mut Option<Box<dyn FnMut() -> Option<InputEvent>>>,
+    poll_client: &mut Option<Box<dyn FnMut() -> Option<ClientMessage>>>,
+    clock: &mut FrameClock,
     keyboard: &KeyboardHandle<Webland>,
     pointer: &PointerHandle<Webland>,
     start_time: std::time::Instant,
 ) {
-    let Some(poll) = poll_input.as_mut() else {
+    let Some(poll) = poll_client.as_mut() else {
         return;
     };
     let mut events = Vec::new();
-    while let Some(event) = poll() {
-        events.push(event);
+    while let Some(message) = poll() {
+        match message {
+            ClientMessage::Input(event) => events.push(event),
+            ClientMessage::FramePresented => clock.on_ack(),
+        }
     }
     if !events.is_empty()
         && let Some(surface) = state
@@ -390,8 +469,12 @@ fn stream_dirty(
     }
 }
 
-/// Fire frame callbacks so every mapped client renders its next frame.
-fn tick_frame_callbacks(state: &Webland, start_time: std::time::Instant) {
+/// Fire frame callbacks so every mapped client renders its next frame — but only
+/// when [`FrameClock`] says the browser is ready for one.
+fn tick_frame_callbacks(state: &Webland, start_time: std::time::Instant, clock: &mut FrameClock) {
+    if !clock.should_tick(std::time::Instant::now()) {
+        return;
+    }
     let now = start_time.elapsed().as_millis() as u32;
     for surface in state.xdg_shell_state.toplevel_surfaces() {
         send_frames_surface_tree(surface.wl_surface(), now);
@@ -418,7 +501,7 @@ fn tick_frame_callbacks(state: &Webland, start_time: std::time::Instant) {
 /// is assumed healthy for the lifetime of the window.
 pub fn run_winit(
     on_frame: Option<Box<dyn Fn(ServerMessage)>>,
-    mut poll_input: Option<Box<dyn FnMut() -> Option<InputEvent>>>,
+    mut poll_client: Option<Box<dyn FnMut() -> Option<ClientMessage>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut display: Display<Webland> = Display::new()?;
     let dh = display.handle();
@@ -471,6 +554,7 @@ pub fn run_winit(
     let mut known: HashMap<_, (SurfaceId, Option<Size>)> = HashMap::new();
     let mut next_surface_id: u64 = 0;
     let mut tick: u64 = 0;
+    let mut clock = FrameClock::new();
 
     loop {
         let status = winit.dispatch_new_events(|event| match event {
@@ -497,7 +581,14 @@ pub fn run_winit(
             return Ok(());
         }
 
-        drain_input(&mut state, &mut poll_input, &keyboard, &pointer, start_time);
+        drain_client(
+            &mut state,
+            &mut poll_client,
+            &mut clock,
+            &keyboard,
+            &pointer,
+            start_time,
+        );
 
         let size = backend.window_size();
         let damage = Rectangle::from_size(size);
@@ -538,7 +629,7 @@ pub fn run_winit(
             &mut next_surface_id,
             &mut tick,
         );
-        tick_frame_callbacks(&state, start_time);
+        tick_frame_callbacks(&state, start_time, &mut clock);
 
         if let Some(stream) = listener.accept()? {
             let client = display
@@ -565,7 +656,7 @@ pub fn run_winit(
 /// client dispatch fails.
 pub fn run_headless(
     on_frame: Option<Box<dyn Fn(ServerMessage)>>,
-    mut poll_input: Option<Box<dyn FnMut() -> Option<InputEvent>>>,
+    mut poll_client: Option<Box<dyn FnMut() -> Option<ClientMessage>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut display: Display<Webland> = Display::new()?;
     let dh = display.handle();
@@ -615,6 +706,7 @@ pub fn run_headless(
     let mut known: HashMap<ObjectId, (SurfaceId, Option<Size>)> = HashMap::new();
     let mut next_surface_id: u64 = 0;
     let mut tick: u64 = 0;
+    let mut clock = FrameClock::new();
 
     loop {
         if let Some(stream) = listener.accept()? {
@@ -625,7 +717,14 @@ pub fn run_headless(
         }
         display.dispatch_clients(&mut state)?;
 
-        drain_input(&mut state, &mut poll_input, &keyboard, &pointer, start_time);
+        drain_client(
+            &mut state,
+            &mut poll_client,
+            &mut clock,
+            &keyboard,
+            &pointer,
+            start_time,
+        );
         stream_dirty(
             &mut state,
             on_frame.as_deref(),
@@ -633,7 +732,7 @@ pub fn run_headless(
             &mut next_surface_id,
             &mut tick,
         );
-        tick_frame_callbacks(&state, start_time);
+        tick_frame_callbacks(&state, start_time, &mut clock);
 
         display.flush_clients()?;
         std::thread::sleep(std::time::Duration::from_millis(16));
@@ -645,3 +744,57 @@ delegate_xdg_shell!(Webland);
 delegate_shm!(Webland);
 delegate_seat!(Webland);
 delegate_data_device!(Webland);
+
+#[cfg(test)]
+mod tests {
+    use super::{FrameClock, IDLE_FRAME_INTERVAL, INITIAL_FRAME_CREDIT};
+    use std::time::Instant;
+
+    #[test]
+    fn frame_clock_spends_credit_then_waits_for_the_browser() {
+        let now = Instant::now();
+        let mut clock = FrameClock::new();
+
+        // Clients may render a little before any browser has presented.
+        for _ in 0..INITIAL_FRAME_CREDIT {
+            assert!(clock.should_tick(now));
+        }
+        // Out of credit: no more callbacks until the browser catches up, so the
+        // client cannot run ahead into frames that will be discarded.
+        assert!(!clock.should_tick(now));
+
+        clock.on_ack();
+        assert!(clock.should_tick(now));
+        assert!(!clock.should_tick(now));
+    }
+
+    #[test]
+    fn frame_clock_keeps_clients_alive_with_no_browser() {
+        let start = Instant::now();
+        let mut clock = FrameClock::new();
+        for _ in 0..INITIAL_FRAME_CREDIT {
+            assert!(clock.should_tick(start));
+        }
+        assert!(!clock.should_tick(start));
+
+        // Without this, a compositor whose browser never connects would stall
+        // every client forever: no render, no frame, no ack, no credit.
+        assert!(clock.should_tick(start + IDLE_FRAME_INTERVAL));
+        assert!(!clock.should_tick(start + IDLE_FRAME_INTERVAL));
+    }
+
+    #[test]
+    fn frame_clock_caps_banked_credit() {
+        let now = Instant::now();
+        let mut clock = FrameClock::new();
+        // A burst of acks (or a browser reconnecting) must not let clients
+        // free-run afterwards.
+        for _ in 0..50 {
+            clock.on_ack();
+        }
+        for _ in 0..INITIAL_FRAME_CREDIT {
+            assert!(clock.should_tick(now));
+        }
+        assert!(!clock.should_tick(now));
+    }
+}

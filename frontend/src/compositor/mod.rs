@@ -9,6 +9,24 @@ use wasm_bindgen::{Clamped, JsCast, JsValue};
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData};
 use webland_protocol::{Codec, ServerMessage, SurfaceFrame, inflate};
 
+use crate::gpu::GpuRenderer;
+
+/// The active render path: WebGPU when available, else the 2D canvas.
+pub enum Renderer {
+    Gpu(Box<GpuRenderer>),
+    Canvas(SurfaceRenderer),
+}
+
+impl Renderer {
+    /// Apply a server message to whichever renderer is active.
+    pub fn handle(&mut self, message: ServerMessage) {
+        match self {
+            Renderer::Gpu(renderer) => renderer.handle(message),
+            Renderer::Canvas(renderer) => renderer.handle(message),
+        }
+    }
+}
+
 /// Renders one surface's frames into a canvas.
 #[derive(Debug)]
 pub struct SurfaceRenderer {
@@ -38,9 +56,14 @@ impl SurfaceRenderer {
     pub fn handle(&mut self, message: ServerMessage) {
         match message {
             ServerMessage::SurfaceCreated(created) => {
-                self.size = Some((created.size.width, created.size.height));
-                self.canvas.set_width(created.size.width);
-                self.canvas.set_height(created.size.height);
+                let size = (created.size.width, created.size.height);
+                // Only resize when it actually changes: setting width/height
+                // clears the canvas, which would flicker on every re-announce.
+                if self.size != Some(size) {
+                    self.size = Some(size);
+                    self.canvas.set_width(created.size.width);
+                    self.canvas.set_height(created.size.height);
+                }
             }
             ServerMessage::SurfaceFrame(frame) => self.draw(&frame),
         }
@@ -48,7 +71,7 @@ impl SurfaceRenderer {
 
     fn draw(&self, frame: &SurfaceFrame) {
         // Recover raw BGRA pixels. H.264 belongs to the WebCodecs path, not here.
-        let raw = match frame.codec {
+        let mut rgba = match frame.codec {
             Codec::Raw => frame.payload.clone(),
             Codec::Deflate => match inflate(&frame.payload) {
                 Ok(bytes) => bytes,
@@ -60,14 +83,14 @@ impl SurfaceRenderer {
             return;
         };
         let expected = (width as usize) * (height as usize) * 4;
-        if raw.len() < expected {
+        if rgba.len() < expected {
             return;
         }
+        rgba.truncate(expected);
 
-        // wl_shm is little-endian ARGB, i.e. BGRA in memory; swizzle to RGBA for
-        // ImageData. (Assumes tightly packed rows; stride/format land with the
-        // protocol's per-frame metadata later.)
-        let mut rgba = raw[..expected].to_vec();
+        // wl_shm is little-endian ARGB, i.e. BGRA in memory; swizzle in place to
+        // RGBA for ImageData. (Assumes tightly packed rows; stride/format land
+        // with the protocol's per-frame metadata later.)
         let mut i = 0;
         while i < rgba.len() {
             rgba.swap(i, i + 2);

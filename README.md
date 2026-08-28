@@ -72,7 +72,7 @@ damage. Run headless — the browser is the only display:
 ```sh
 # both halves; browser is the only display, with a client to show
 WEBLAND_SPAWN=kitty ./scripts/dev.sh
-# then open http://127.0.0.1:3000
+# then open http://127.0.0.1:3030
 ```
 
 Use an **shm** client (`kitty`, `weston-terminal`); GL/dmabuf-only clients have
