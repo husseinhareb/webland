@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 thiserror = "2.0.20"
+serde = { version = "1.0.229", features = ["derive"] }
 
 [lints]
 workspace = true
