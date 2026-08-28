@@ -8,6 +8,11 @@ publish.workspace = true
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
+webland-core.workspace = true
+# Pure-Rust, compiles to wasm: the same codecs run on both ends.
+bincode = "1.3.3"
+miniz_oxide = "0.8"
+thiserror = "2.0.20"
 
 [lints]
 workspace = true
