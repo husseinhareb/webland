@@ -7,6 +7,7 @@
 mod compositor;
 mod desktop;
 mod gpu;
+mod input;
 mod protocol;
 
 use desktop::Desktop;

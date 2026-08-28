@@ -11,17 +11,24 @@ repository = "https://github.com/husseinhareb/webland"
 publish = false
 
 [dependencies]
-# The wire format, shared verbatim with the backend. One codec, no drift.
+# The wire format and shared vocabulary, verbatim with the backend. No drift.
 webland-protocol = { path = "../backend/crates/webland-protocol" }
+webland-core = { path = "../backend/crates/webland-core" }
 
 leptos = { version = "0.7", features = ["csr"] }
 wasm-bindgen = "0.2"
+js-sys = "0.3"
 console_error_panic_hook = "0.1"
 
 [dependencies.web-sys]
 version = "0.3"
-# Widened as the frontend reaches for WebSocket, WebCodecs and WebGPU.
-features = ["Window", "Document"]
+# Widened as the frontend reaches for WebCodecs and WebGPU.
+features = [
+    "Window", "Document", "Element", "EventTarget",
+    "WebSocket", "BinaryType", "MessageEvent", "Event",
+    "HtmlCanvasElement", "CanvasRenderingContext2d", "ImageData",
+    "PointerEvent", "MouseEvent", "KeyboardEvent",
+]
 
 [profile.release]
 opt-level = "z"
