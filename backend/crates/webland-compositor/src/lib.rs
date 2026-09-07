@@ -36,6 +36,10 @@ use webland_protocol::{
     ClientMessage, Codec, InputEvent, Press, ServerMessage, SurfaceCreated, SurfaceFrame,
 };
 
+use smithay::backend::allocator::dmabuf::Dmabuf;
+use smithay::backend::allocator::gbm::GbmDevice;
+use smithay::backend::allocator::{Buffer, Fourcc};
+use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::input::{
     ButtonState, InputEvent as BackendInputEvent, KeyState, KeyboardKeyEvent, Keycode,
 };
@@ -48,6 +52,7 @@ use smithay::backend::renderer::utils::{
     CommitCounter, draw_render_elements, on_commit_buffer_handler, with_renderer_surface_state,
 };
 use smithay::backend::renderer::{Color32F, Frame, Renderer};
+use smithay::backend::renderer::{ExportMem, ImportDma};
 use smithay::backend::winit::{self, WinitEvent};
 use smithay::input::keyboard::{FilterResult, KeyboardHandle};
 use smithay::input::pointer::{ButtonEvent, MotionEvent, PointerHandle};
@@ -67,6 +72,9 @@ use smithay::wayland::compositor::{
     CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes, TraversalAction,
     with_surface_tree_downward,
 };
+use smithay::wayland::dmabuf::{
+    DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier, get_dmabuf,
+};
 use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
@@ -76,7 +84,8 @@ use smithay::wayland::shell::xdg::{
 };
 use smithay::wayland::shm::{ShmHandler, ShmState, with_buffer_contents};
 use smithay::{
-    delegate_compositor, delegate_data_device, delegate_seat, delegate_shm, delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_seat, delegate_shm,
+    delegate_xdg_shell,
 };
 
 /// Compositor state. Holds the protocol globals and the seat; owns everything a
@@ -86,6 +95,7 @@ pub struct Webland {
     compositor_state: CompositorState,
     xdg_shell_state: XdgShellState,
     shm_state: ShmState,
+    dmabuf_state: DmabufState,
     seat_state: SeatState<Self>,
     data_device_state: DataDeviceState,
     seat: Seat<Self>,
@@ -148,6 +158,26 @@ impl XdgShellHandler for Webland {
 impl ShmHandler for Webland {
     fn shm_state(&self) -> &ShmState {
         &self.shm_state
+    }
+}
+
+impl DmabufHandler for Webland {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf_state
+    }
+
+    // ponytail: accepts without importing. The renderer lives in `run_headless`,
+    // not in this state, and the formats we advertise came from that same
+    // renderer — so a buffer that fails here would be a surprise. A failed
+    // import at capture time just skips the frame. Import here (and hold the
+    // renderer in `Webland`) if clients ever start seeing silent black windows.
+    fn dmabuf_imported(
+        &mut self,
+        _global: &DmabufGlobal,
+        _dmabuf: Dmabuf,
+        notifier: ImportNotifier,
+    ) {
+        let _ = notifier.successful::<Self>();
     }
 }
 
@@ -372,10 +402,84 @@ fn configured_size() -> (i32, i32) {
         .unwrap_or((1280, 800))
 }
 
+/// Bring up a GLES renderer on the render node, for clients that hand us GPU
+/// buffers instead of shared memory.
+///
+/// Returns the renderer and the node's device id, or `None` — with a warning,
+/// not an error — if there is no usable render node: `wl_shm` clients still work
+/// without one, they are just the slow path. `--example gpu_probe` is the quick
+/// way to find out why this failed.
+fn open_gpu() -> Option<(GlesRenderer, u64)> {
+    let path = std::env::var("WEBLAND_RENDER_NODE")
+        .unwrap_or_else(|_| String::from("/dev/dri/renderD128"));
+    let open = || -> Result<(GlesRenderer, u64), Box<dyn std::error::Error>> {
+        let file = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        // Read before the file moves into gbm: dmabuf feedback names the device
+        // by its dev_t, and that is how Mesa knows which node to open.
+        let device = std::os::unix::fs::MetadataExt::rdev(&file.metadata()?);
+        let gbm = GbmDevice::new(file)?;
+        // SAFETY: the display owns the gbm device for the rest of the process,
+        // and we hand its fd to nothing else.
+        #[allow(unsafe_code)]
+        let egl = unsafe { EGLDisplay::new(gbm) }?;
+        let context = EGLContext::new(&egl)?;
+        // SAFETY: called once, on the thread that owns the context, and this
+        // renderer never leaves that thread.
+        #[allow(unsafe_code)]
+        let renderer = unsafe { GlesRenderer::new(context) }?;
+        Ok((renderer, device))
+    };
+    match open() {
+        Ok(gpu) => {
+            tracing::info!(node = %path, "GPU up; offering linux-dmabuf-v1");
+            Some(gpu)
+        }
+        Err(err) => {
+            tracing::warn!(node = %path, %err, "no GPU; clients fall back to wl_shm");
+            None
+        }
+    }
+}
+
+/// Copy a surface's committed contents, tightly packed, whichever kind of buffer
+/// the client committed.
+fn capture(renderer: Option<&mut GlesRenderer>, surface: &WlSurface) -> Option<(Size, Vec<u8>)> {
+    match capture_shm(surface) {
+        Some(captured) => Some(captured),
+        None => capture_dmabuf(renderer?, surface),
+    }
+}
+
+/// Copy a surface's committed dmabuf contents by way of the GPU.
+///
+/// ponytail: this reads the buffer back to the CPU, which is precisely what
+/// Decision 2 forbids — the frame then goes down the same Deflate path as an
+/// shm one. It exists so that advertising the dmabuf global does not black out
+/// every client that takes it up. Deleted when VA-API encodes from the dmabuf
+/// directly, which is the actual gate.
+fn capture_dmabuf(renderer: &mut GlesRenderer, surface: &WlSurface) -> Option<(Size, Vec<u8>)> {
+    let buffer = with_renderer_surface_state(surface, |s| s.buffer().cloned())??;
+    let dmabuf = get_dmabuf(&buffer).ok()?;
+    let size = Size {
+        width: dmabuf.width(),
+        height: dmabuf.height(),
+    };
+    #[allow(clippy::cast_possible_wrap)]
+    let region = Rectangle::from_size((size.width as i32, size.height as i32).into());
+    let texture = renderer.import_dmabuf(dmabuf, None).ok()?;
+    let mapping = renderer
+        .copy_texture(&texture, region, Fourcc::Argb8888)
+        .ok()?;
+    Some((size, renderer.map_texture(&mapping).ok()?.to_vec()))
+}
+
 /// Copy a surface's committed `wl_shm` contents, tightly packed.
 ///
-/// Returns `None` until the surface has an shm buffer (dmabuf clients take the
-/// zero-copy path described in Decision 2, which is not wired here yet).
+/// Returns `None` if the surface has no buffer, or a buffer that is not shm —
+/// `capture_dmabuf` handles the latter.
 fn capture_shm(surface: &WlSurface) -> Option<(Size, Vec<u8>)> {
     with_renderer_surface_state(surface, |renderer_state| {
         let buffer = renderer_state.buffer()?;
@@ -496,6 +600,7 @@ struct Tracked {
 /// rectangle to land on, so it asks for a keyframe and gets whole surfaces once.
 fn stream_dirty(
     state: &mut Webland,
+    mut renderer: Option<&mut GlesRenderer>,
     on_frame: Option<&dyn Fn(ServerMessage)>,
     known: &mut HashMap<ObjectId, Tracked>,
     next_surface_id: &mut u64,
@@ -527,7 +632,7 @@ fn stream_dirty(
         if tracked.commit == Some(commit) && !keyframe {
             continue;
         }
-        let Some((size, pixels)) = capture_shm(surface) else {
+        let Some((size, pixels)) = capture(renderer.as_deref_mut(), surface) else {
             continue;
         };
         if pixels.is_empty() {
@@ -609,6 +714,8 @@ pub fn run_winit(
 
     let compositor_state = CompositorState::new::<Webland>(&dh);
     let shm_state = ShmState::new::<Webland>(&dh, vec![]);
+    // Phase 1 renders through winit's own GL context; no dmabuf global here.
+    let dmabuf_state = DmabufState::new();
     let xdg_shell_state = XdgShellState::new::<Webland>(&dh);
     let data_device_state = DataDeviceState::new::<Webland>(&dh);
     let mut seat_state = SeatState::new();
@@ -618,6 +725,7 @@ pub fn run_winit(
         compositor_state,
         xdg_shell_state,
         shm_state,
+        dmabuf_state,
         seat_state,
         data_device_state,
         seat,
@@ -724,6 +832,7 @@ pub fn run_winit(
 
         stream_dirty(
             &mut state,
+            None,
             on_frame.as_deref(),
             &mut known,
             &mut next_surface_id,
@@ -762,6 +871,17 @@ pub fn run_headless(
 
     let compositor_state = CompositorState::new::<Webland>(&dh);
     let shm_state = ShmState::new::<Webland>(&dh, vec![]);
+    let gpu = open_gpu();
+    let mut dmabuf_state = DmabufState::new();
+    // Must be the v4 global, built with default feedback. A v3 global advertises
+    // formats but never names a device, and Mesa's EGL Wayland platform learns
+    // which DRM node to open from exactly that: without feedback it gets fd -1,
+    // gives up, and the client silently falls back to wl_shm.
+    if let Some((renderer, device)) = gpu.as_ref() {
+        let feedback = DmabufFeedbackBuilder::new(*device, renderer.dmabuf_formats()).build()?;
+        dmabuf_state.create_global_with_default_feedback::<Webland>(&dh, &feedback);
+    }
+    let mut renderer = gpu.map(|(renderer, _)| renderer);
     let xdg_shell_state = XdgShellState::new::<Webland>(&dh);
     let data_device_state = DataDeviceState::new::<Webland>(&dh);
     let mut seat_state = SeatState::new();
@@ -771,6 +891,7 @@ pub fn run_headless(
         compositor_state,
         xdg_shell_state,
         shm_state,
+        dmabuf_state,
         seat_state,
         data_device_state,
         seat,
@@ -825,6 +946,7 @@ pub fn run_headless(
         );
         stream_dirty(
             &mut state,
+            renderer.as_mut(),
             on_frame.as_deref(),
             &mut known,
             &mut next_surface_id,
@@ -839,6 +961,7 @@ pub fn run_headless(
 delegate_compositor!(Webland);
 delegate_xdg_shell!(Webland);
 delegate_shm!(Webland);
+delegate_dmabuf!(Webland);
 delegate_seat!(Webland);
 delegate_data_device!(Webland);
 
