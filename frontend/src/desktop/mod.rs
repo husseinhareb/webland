@@ -85,8 +85,15 @@ fn wire_transport(
         }
     };
 
+    // Frames carry only damaged pixels, so a mid-stream joiner needs one full
+    // surface to patch into; asking on connect is what keeps an idle desktop
+    // from costing anything at all.
+    let opened = transport.clone();
     transport.on_open(Box::new(move || {
         status.set(String::from("connected — waiting for a surface…"));
+        if let Ok(frame) = encode(&ClientMessage::RequestKeyframe) {
+            opened.send(&frame);
+        }
     }));
     transport.on_close(Box::new(move || {
         status.set(format!(

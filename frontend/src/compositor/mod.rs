@@ -79,10 +79,14 @@ impl SurfaceRenderer {
             },
             Codec::H264 => return,
         };
-        let Some((width, height)) = self.size else {
+        // Frames carry only what changed; the canvas keeps the rest.
+        let Some(region) = frame.damage.first().copied() else {
             return;
         };
-        let expected = (width as usize) * (height as usize) * 4;
+        if region.width == 0 || region.height == 0 {
+            return;
+        }
+        let expected = (region.width as usize) * (region.height as usize) * 4;
         if rgba.len() < expected {
             return;
         }
@@ -97,10 +101,14 @@ impl SurfaceRenderer {
             i += 4;
         }
 
-        if let Ok(image) =
-            ImageData::new_with_u8_clamped_array_and_sh(Clamped(&rgba), width, height)
-        {
-            let _ = self.ctx.put_image_data(&image, 0.0, 0.0);
+        if let Ok(image) = ImageData::new_with_u8_clamped_array_and_sh(
+            Clamped(&rgba),
+            region.width,
+            region.height,
+        ) {
+            let _ = self
+                .ctx
+                .put_image_data(&image, f64::from(region.x), f64::from(region.y));
         }
     }
 }

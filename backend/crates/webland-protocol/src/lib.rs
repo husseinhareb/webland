@@ -132,6 +132,13 @@ pub enum ClientMessage {
     /// what lets the browser drive the frame clock (Decision 3): the server
     /// holds back until it arrives, so the in-flight queue stays bounded.
     FramePresented,
+    /// Send full contents for every surface on the next frame.
+    ///
+    /// Frames carry only damaged regions, so a browser joining mid-stream has
+    /// nothing to apply them to. It asks once on connect; without this the
+    /// server would have to spend a full surface periodically on the chance
+    /// that someone is listening.
+    RequestKeyframe,
 }
 
 #[cfg(test)]

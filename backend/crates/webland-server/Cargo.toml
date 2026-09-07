@@ -16,5 +16,9 @@ webland-compositor.workspace = true
 webland-core.workspace = true
 webland-protocol.workspace = true
 
+[dev-dependencies]
+# `measure` needs a deadline; the server itself never sleeps.
+tokio = { version = "1.53.1", features = ["time"] }
+
 [lints]
 workspace = true

@@ -27,11 +27,11 @@
 /// Re-exported so downstream crates pin one Wayland stack.
 pub use smithay;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::os::unix::io::OwnedFd;
 use std::sync::Arc;
 
-use webland_core::{Size, SurfaceId};
+use webland_core::{Rect, Size, SurfaceId};
 use webland_protocol::{
     ClientMessage, Codec, InputEvent, Press, ServerMessage, SurfaceCreated, SurfaceFrame,
 };
@@ -45,7 +45,7 @@ use smithay::backend::renderer::element::surface::{
 };
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::{
-    draw_render_elements, on_commit_buffer_handler, with_renderer_surface_state,
+    CommitCounter, draw_render_elements, on_commit_buffer_handler, with_renderer_surface_state,
 };
 use smithay::backend::renderer::{Color32F, Frame, Renderer};
 use smithay::backend::winit::{self, WinitEvent};
@@ -89,8 +89,9 @@ pub struct Webland {
     seat_state: SeatState<Self>,
     data_device_state: DataDeviceState,
     seat: Seat<Self>,
-    /// Surfaces committed since the last frame was streamed (damage tracking).
-    dirty: HashSet<ObjectId>,
+    /// Set by the browser on connect: send whole surfaces on the next frame,
+    /// because a joiner has nothing for a damage rectangle to land on.
+    keyframe: bool,
 }
 
 impl BufferHandler for Webland {
@@ -107,8 +108,10 @@ impl CompositorHandler for Webland {
     }
 
     fn commit(&mut self, surface: &WlSurface) {
+        // This also moves the commit's damage into the surface's renderer
+        // state, converted to buffer coordinates — which is where
+        // `damage_since` reads it, so nothing else needs doing here.
         on_commit_buffer_handler::<Self>(surface);
-        self.dirty.insert(surface.id());
     }
 }
 
@@ -321,10 +324,42 @@ impl FrameClock {
     }
 }
 
-/// Re-announce every surface roughly once a second (headless runs at ~60Hz) so
-/// a browser that connects mid-stream promptly learns each surface's size and
-/// gets a keyframe (the broadcast has no history).
-const REANNOUNCE_EVERY: u64 = 60;
+/// The bounding box of the pixels that actually differ, or `None` if none do.
+///
+/// Client-declared damage would be cheaper, but it cannot be relied on: a
+/// client rendering through Mesa's EGL→`wl_shm` fallback declares the whole
+/// surface every frame, which is exactly the case in front of us. Comparing
+/// what we captured against what the browser already has costs one pass over
+/// the buffer and is true for every client.
+fn changed_region(old: &[u8], new: &[u8], size: Size) -> Option<Rect> {
+    let stride = size.width as usize * 4;
+    if old.len() != new.len() || stride == 0 {
+        return None;
+    }
+    let differs = |y: usize| old[y * stride..(y + 1) * stride] != new[y * stride..(y + 1) * stride];
+
+    let rows = size.height as usize;
+    let top = (0..rows).find(|&y| differs(y))?;
+    let bottom = (top..rows).rfind(|&y| differs(y))?;
+    // Narrow horizontally too: a blinking cursor is one cell, not one line.
+    let (mut left, mut right) = (stride, 0);
+    for y in top..=bottom {
+        let (a, b) = (&old[y * stride..(y + 1) * stride], &new[y * stride..]);
+        if let Some(first) = a.iter().zip(b).position(|(x, y)| x != y) {
+            left = left.min(first / 4 * 4);
+        }
+        if let Some(last) = a.iter().zip(b).rposition(|(x, y)| x != y) {
+            right = right.max(last / 4 * 4 + 4);
+        }
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    Some(Rect {
+        x: (left / 4) as i32,
+        y: top as i32,
+        width: ((right - left) / 4) as u32,
+        height: (bottom - top + 1) as u32,
+    })
+}
 
 /// The size to ask clients to render at, from `WEBLAND_SIZE=WxH` (default 1280x800).
 fn configured_size() -> (i32, i32) {
@@ -337,7 +372,7 @@ fn configured_size() -> (i32, i32) {
         .unwrap_or((1280, 800))
 }
 
-/// Copy a surface's currently-committed `wl_shm` contents into a raw frame.
+/// Copy a surface's committed `wl_shm` contents, tightly packed.
 ///
 /// Returns `None` until the surface has an shm buffer (dmabuf clients take the
 /// zero-copy path described in Decision 2, which is not wired here yet).
@@ -345,19 +380,45 @@ fn capture_shm(surface: &WlSurface) -> Option<(Size, Vec<u8>)> {
     with_renderer_surface_state(surface, |renderer_state| {
         let buffer = renderer_state.buffer()?;
         with_buffer_contents(buffer, |ptr, len, data| {
+            #[allow(clippy::cast_sign_loss)]
             let size = Size {
-                width: data.width as u32,
-                height: data.height as u32,
+                width: data.width.max(0) as u32,
+                height: data.height.max(0) as u32,
+            };
+            let whole = Rect {
+                x: 0,
+                y: 0,
+                width: size.width,
+                height: size.height,
             };
             // SAFETY: smithay guarantees `ptr` addresses `len` initialized bytes
             // of the shm pool mapping for the duration of this callback.
             #[allow(unsafe_code)]
-            let pixels = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
-            (size, pixels)
+            let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+            (size, crop(bytes, data.offset, data.stride, whole))
         })
         .ok()
     })
     .flatten()
+}
+
+/// Pack `region` out of a strided BGRA buffer into tightly-packed rows.
+///
+/// Returns empty if the buffer is shorter than the region implies, rather than
+/// reading past it — the pool is client-controlled memory.
+#[allow(clippy::cast_sign_loss)]
+fn crop(bytes: &[u8], offset: i32, stride: i32, region: Rect) -> Vec<u8> {
+    let (offset, stride) = (offset.max(0) as usize, stride.max(0) as usize);
+    let row_bytes = region.width as usize * 4;
+    let mut pixels = Vec::with_capacity(row_bytes * region.height as usize);
+    for row in 0..region.height as usize {
+        let start = offset + (region.y as usize + row) * stride + region.x as usize * 4;
+        let Some(source) = bytes.get(start..start + row_bytes) else {
+            return Vec::new();
+        };
+        pixels.extend_from_slice(source);
+    }
+    pixels
 }
 
 /// Fire the frame callbacks on a surface tree so clients render their next frame.
@@ -399,6 +460,7 @@ fn drain_client(
         match message {
             ClientMessage::Input(event) => events.push(event),
             ClientMessage::FramePresented => clock.on_ack(),
+            ClientMessage::RequestKeyframe => state.keyframe = true,
         }
     }
     if !events.is_empty()
@@ -416,20 +478,32 @@ fn drain_client(
     }
 }
 
+/// What the browser has been told about one surface.
+struct Tracked {
+    id: SurfaceId,
+    size: Option<Size>,
+    /// The commit the browser's pixels came from, so an untouched surface costs
+    /// nothing to skip.
+    commit: Option<CommitCounter>,
+    /// The pixels the browser is holding, to diff the next capture against.
+    pixels: Vec<u8>,
+}
+
 /// Capture changed surfaces and emit their frames to the browser transport.
+///
+/// Only pixels that actually changed go on the wire, so an idle surface costs
+/// nothing at all. A browser joining mid-stream has nothing for a damage
+/// rectangle to land on, so it asks for a keyframe and gets whole surfaces once.
 fn stream_dirty(
     state: &mut Webland,
     on_frame: Option<&dyn Fn(ServerMessage)>,
-    known: &mut HashMap<ObjectId, (SurfaceId, Option<Size>)>,
+    known: &mut HashMap<ObjectId, Tracked>,
     next_surface_id: &mut u64,
-    tick: &mut u64,
 ) {
     let Some(emit) = on_frame else {
         return;
     };
-    *tick = tick.wrapping_add(1);
-    let reannounce = tick.is_multiple_of(REANNOUNCE_EVERY);
-    // Snapshot toplevels so we can consult and clear `state.dirty` freely.
+    let keyframe = std::mem::take(&mut state.keyframe);
     let toplevels: Vec<WlSurface> = state
         .xdg_shell_state
         .toplevel_surfaces()
@@ -437,34 +511,61 @@ fn stream_dirty(
         .map(|toplevel| toplevel.wl_surface().clone())
         .collect();
     for surface in &toplevels {
-        let object = surface.id();
-        // Stream only surfaces that changed, plus a periodic keyframe so a browser
-        // that connects mid-stream still gets current pixels.
-        let changed = state.dirty.remove(&object);
-        if !(changed || reannounce) {
-            continue;
-        }
-        let Some((surface_size, pixels)) = capture_shm(surface) else {
-            continue;
-        };
-        let entry = known.entry(object).or_insert_with(|| {
+        let tracked = known.entry(surface.id()).or_insert_with(|| {
             let id = SurfaceId(*next_surface_id);
             *next_surface_id += 1;
-            (id, None)
-        });
-        let id = entry.0;
-        if reannounce || entry.1 != Some(surface_size) {
-            entry.1 = Some(surface_size);
-            emit(ServerMessage::SurfaceCreated(SurfaceCreated {
+            Tracked {
                 id,
-                size: surface_size,
-            }));
+                size: None,
+                commit: None,
+                pixels: Vec::new(),
+            }
+        });
+        let Some(commit) = with_renderer_surface_state(surface, |s| s.current_commit()) else {
+            continue;
+        };
+        if tracked.commit == Some(commit) && !keyframe {
+            continue;
         }
+        let Some((size, pixels)) = capture_shm(surface) else {
+            continue;
+        };
+        if pixels.is_empty() {
+            continue;
+        }
+        tracked.commit = Some(commit);
+
+        // A resize invalidates whatever the browser is holding, and so does a
+        // browser that has just joined: both take the whole surface.
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            width: size.width,
+            height: size.height,
+        };
+        let region = if keyframe || tracked.size != Some(size) {
+            tracked.size = Some(size);
+            emit(ServerMessage::SurfaceCreated(SurfaceCreated {
+                id: tracked.id,
+                size,
+            }));
+            whole
+        } else {
+            match changed_region(&tracked.pixels, &pixels, size) {
+                Some(region) => region,
+                // Committed, but the pixels are identical: nothing to send.
+                None => continue,
+            }
+        };
+
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let payload = crop(&pixels, 0, (size.width * 4) as i32, region);
+        tracked.pixels = pixels;
         emit(ServerMessage::SurfaceFrame(SurfaceFrame {
-            id,
+            id: tracked.id,
             codec: Codec::Deflate,
-            damage: Vec::new(),
-            payload: webland_protocol::deflate(&pixels),
+            damage: vec![region],
+            payload: webland_protocol::deflate(&payload),
         }));
     }
 }
@@ -520,7 +621,7 @@ pub fn run_winit(
         seat_state,
         data_device_state,
         seat,
-        dirty: HashSet::new(),
+        keyframe: false,
     };
 
     let keyboard = state
@@ -551,9 +652,8 @@ pub fn run_winit(
     let mut clients = Vec::new();
 
     // Maps each live surface to its announced id and last announced size.
-    let mut known: HashMap<_, (SurfaceId, Option<Size>)> = HashMap::new();
+    let mut known: HashMap<_, Tracked> = HashMap::new();
     let mut next_surface_id: u64 = 0;
-    let mut tick: u64 = 0;
     let mut clock = FrameClock::new();
 
     loop {
@@ -627,7 +727,6 @@ pub fn run_winit(
             on_frame.as_deref(),
             &mut known,
             &mut next_surface_id,
-            &mut tick,
         );
         tick_frame_callbacks(&state, start_time, &mut clock);
 
@@ -675,7 +774,7 @@ pub fn run_headless(
         seat_state,
         data_device_state,
         seat,
-        dirty: HashSet::new(),
+        keyframe: false,
     };
 
     let keyboard = state
@@ -703,9 +802,8 @@ pub fn run_headless(
 
     let start_time = std::time::Instant::now();
     let mut clients = Vec::new();
-    let mut known: HashMap<ObjectId, (SurfaceId, Option<Size>)> = HashMap::new();
+    let mut known: HashMap<ObjectId, Tracked> = HashMap::new();
     let mut next_surface_id: u64 = 0;
-    let mut tick: u64 = 0;
     let mut clock = FrameClock::new();
 
     loop {
@@ -730,7 +828,6 @@ pub fn run_headless(
             on_frame.as_deref(),
             &mut known,
             &mut next_surface_id,
-            &mut tick,
         );
         tick_frame_callbacks(&state, start_time, &mut clock);
 
@@ -747,8 +844,54 @@ delegate_data_device!(Webland);
 
 #[cfg(test)]
 mod tests {
-    use super::{FrameClock, IDLE_FRAME_INTERVAL, INITIAL_FRAME_CREDIT};
+    use super::{FrameClock, IDLE_FRAME_INTERVAL, INITIAL_FRAME_CREDIT, changed_region, crop};
     use std::time::Instant;
+    use webland_core::{Rect, Size};
+
+    fn rect(x: i32, y: i32, width: u32, height: u32) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn changed_region_bounds_only_what_differs() {
+        let size = Size {
+            width: 4,
+            height: 3,
+        };
+        let old = vec![0u8; 4 * 3 * 4];
+        assert_eq!(changed_region(&old, &old, size), None);
+
+        // One pixel, at (2, 1): row 1 of 4 pixels, then 2 pixels in.
+        let mut new = old.clone();
+        new[(4 + 2) * 4] = 9;
+        assert_eq!(changed_region(&old, &new, size), Some(rect(2, 1, 1, 1)));
+
+        // Two apart: the box spans them, rows and columns both.
+        new[(2 * 4) * 4 + 3] = 9;
+        assert_eq!(changed_region(&old, &new, size), Some(rect(0, 1, 3, 2)));
+
+        // A resize is not a diff; the caller sends the whole surface instead.
+        assert_eq!(changed_region(&old, &new[..8], size), None);
+    }
+
+    #[test]
+    fn crop_packs_rows_and_refuses_to_read_past_the_buffer() {
+        // 4x2 BGRA, each pixel byte = its row number, with 4 bytes of padding
+        // per row so the stride is not the width.
+        let stride: i32 = 4 * 4 + 4;
+        let mut buffer = vec![0u8; stride as usize * 2];
+        buffer[stride as usize..stride as usize + 16].fill(1);
+
+        let packed = crop(&buffer, 0, stride, rect(1, 1, 2, 1));
+        assert_eq!(packed, vec![1u8; 8]);
+        // Short buffer: return nothing rather than read off the end.
+        assert!(crop(&buffer[..stride as usize], 0, stride, rect(0, 1, 4, 1)).is_empty());
+    }
 
     #[test]
     fn frame_clock_spends_credit_then_waits_for_the_browser() {

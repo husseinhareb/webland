@@ -256,7 +256,22 @@ impl GpuRenderer {
         let Some(target) = self.target.as_ref() else {
             return;
         };
-        let expected = (target.width as usize) * (target.height as usize) * 4;
+        // Frames carry only what changed; the texture holds the rest, so this
+        // uploads into a sub-rectangle rather than replacing the surface.
+        let Some(region) = frame.damage.first().copied() else {
+            return;
+        };
+        let (Ok(x), Ok(y)) = (u32::try_from(region.x), u32::try_from(region.y)) else {
+            return;
+        };
+        if region.width == 0
+            || region.height == 0
+            || x + region.width > target.width
+            || y + region.height > target.height
+        {
+            return;
+        }
+        let expected = (region.width as usize) * (region.height as usize) * 4;
         if pixels.len() < expected {
             return;
         }
@@ -266,18 +281,18 @@ impl GpuRenderer {
             wgpu::TexelCopyTextureInfo {
                 texture: &target.texture,
                 mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
+                origin: wgpu::Origin3d { x, y, z: 0 },
                 aspect: wgpu::TextureAspect::All,
             },
             &pixels[..expected],
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(target.width * 4),
-                rows_per_image: Some(target.height),
+                bytes_per_row: Some(region.width * 4),
+                rows_per_image: Some(region.height),
             },
             wgpu::Extent3d {
-                width: target.width,
-                height: target.height,
+                width: region.width,
+                height: region.height,
                 depth_or_array_layers: 1,
             },
         );

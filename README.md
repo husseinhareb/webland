@@ -64,10 +64,12 @@ WAYLAND_DISPLAY=wayland-2 weston-terminal
 
 ### Phase 2/3: surfaces into the browser, and input back
 
-Each `wl_shm` surface is captured, deflate-compressed, and streamed over a
-WebSocket to the browser, which draws it to a canvas and sends pointer/keyboard
-input back. Frames are paced by the browser (bounded queue) and only sent on
-damage. Run headless — the browser is the only display:
+Each `wl_shm` surface is captured, diffed against what the browser already has,
+and only the changed rectangle is deflate-compressed and streamed over a
+WebSocket; the browser blits it with WebGPU (2D canvas where WebGPU is off) and
+sends pointer/keyboard input back. Frames are paced by the browser, so clients
+redraw at its rate rather than into a growing queue. Run headless — the browser
+is the only display:
 
 ```sh
 # both halves; browser is the only display, with a client to show
@@ -77,8 +79,20 @@ WEBLAND_SPAWN=kitty ./scripts/dev.sh
 
 Use an **shm** client (`kitty`, `weston-terminal`); GL/dmabuf-only clients have
 no shm buffer to capture yet. Unset `WEBLAND_HEADLESS` to also get a local winit
-window as a debugging ground-truth. Still a 2D-canvas/`Deflate` stopgap — WebGPU
-and H.264/VA-API are the remaining rendering work.
+window as a debugging ground-truth, and set `WEBLAND_SIZE=WxH` to change the
+size clients are configured at.
+
+Phase 2 is measured, not felt (`docs/roadmap.md`), so the wire cost has its own
+client — it connects exactly as the browser does and reports the rate:
+
+```sh
+cargo run --release --manifest-path backend/Cargo.toml \
+  -p webland-server --example measure -- 10
+```
+
+Idle costs one keyframe on connect and nothing after it; a scrolling terminal at
+1280x800 runs ~5.4 MiB/s, which is `Deflate` doing a video codec's job. H.264 off
+a client dmabuf via VA-API is the remaining work.
 
 Linux-first and Wayland-first. Xorg is not a target; X11 applications would be
 handled through XWayland later, if at all.
