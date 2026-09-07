@@ -585,7 +585,7 @@ fn send_frames_surface_tree(surface: &wl_surface::WlSurface, time: u32) {
 fn drain_client(
     state: &mut Webland,
     poll_client: &mut Option<Box<dyn FnMut() -> Option<ClientMessage>>>,
-    clock: &mut FrameClock,
+    known: &mut HashMap<ObjectId, Tracked>,
     keyboard: &KeyboardHandle<Webland>,
     pointer: &PointerHandle<Webland>,
     start_time: std::time::Instant,
@@ -597,10 +597,21 @@ fn drain_client(
     while let Some(message) = poll() {
         match message {
             ClientMessage::Input(event) => events.push(event),
-            ClientMessage::FramePresented => clock.on_ack(),
+            ClientMessage::FramePresented { id } => {
+                if let Some(tracked) = known.values_mut().find(|tracked| tracked.id == id) {
+                    tracked.clock.on_ack();
+                }
+            }
             ClientMessage::RequestKeyframe => state.keyframe = true,
         }
     }
+    // ponytail: input goes to the first surface, not the one the browser
+    // raised. Routing it by focus is written and reverted: sending the
+    // compositor a focus message made kitty report every keystroke as an escape
+    // sequence with a super modifier it was never sent (`\x1b[97;9u` for `a`),
+    // and the cause is not yet understood — the compositor demonstrably injects
+    // the right keycodes and no modifiers, and the same `set_focus` call is made
+    // either way. Shipping half of it would be worse than the limitation.
     if !events.is_empty()
         && let Some(surface) = state
             .xdg_shell_state
@@ -609,7 +620,13 @@ fn drain_client(
             .map(|toplevel| toplevel.wl_surface().clone())
     {
         let now = start_time.elapsed().as_millis() as u32;
-        keyboard.set_focus(state, Some(surface.clone()), SERIAL_COUNTER.next_serial());
+        // Only when it actually changes. Re-focusing a surface that is already
+        // focused makes smithay resend `enter` and `modifiers`, and a client
+        // that gets those mid-stream concludes a modifier is held — kitty then
+        // reports every keystroke as an escape sequence instead of typing it.
+        if keyboard.current_focus().as_ref() != Some(&surface) {
+            keyboard.set_focus(state, Some(surface.clone()), SERIAL_COUNTER.next_serial());
+        }
         for event in events {
             inject_input(state, pointer, keyboard, &surface, event, now);
         }
@@ -629,6 +646,9 @@ struct Tracked {
     /// Built on first use and thrown away on resize, since both the filter graph
     /// and the encoder bake the dimensions in.
     encoder: Option<encode::Encoder>,
+    /// This surface's own pacing. One clock for the whole desktop would let a
+    /// busy window spend the frame callbacks owed to the quiet ones.
+    clock: FrameClock,
 }
 
 /// Capture changed surfaces and emit their frames to the browser transport.
@@ -663,6 +683,7 @@ fn stream_dirty(
                 commit: None,
                 pixels: Vec::new(),
                 encoder: None,
+                clock: FrameClock::new(),
             }
         });
         let Some(commit) = with_renderer_surface_state(surface, |s| s.current_commit()) else {
@@ -788,6 +809,18 @@ fn stream_dirty(
             payload: webland_protocol::deflate(&payload),
         }));
     }
+
+    // Tell the browser about anything that has gone. A closed window would
+    // otherwise sit on screen for good: from the far end an idle surface and a
+    // dead one look identical, both being simply an absence of frames.
+    let live: Vec<ObjectId> = toplevels.iter().map(Resource::id).collect();
+    known.retain(|id, tracked| {
+        let alive = live.contains(id);
+        if !alive {
+            emit(ServerMessage::SurfaceDestroyed { id: tracked.id });
+        }
+        alive
+    });
 }
 
 /// The render node to open, for both the dmabuf global and the encoder.
@@ -806,13 +839,22 @@ fn bitrate() -> i64 {
 
 /// Fire frame callbacks so every mapped client renders its next frame — but only
 /// when [`FrameClock`] says the browser is ready for one.
-fn tick_frame_callbacks(state: &Webland, start_time: std::time::Instant, clock: &mut FrameClock) {
-    if !clock.should_tick(std::time::Instant::now()) {
-        return;
-    }
+fn tick_frame_callbacks(
+    state: &Webland,
+    known: &mut HashMap<ObjectId, Tracked>,
+    start_time: std::time::Instant,
+) {
     let now = start_time.elapsed().as_millis() as u32;
+    let at = std::time::Instant::now();
     for surface in state.xdg_shell_state.toplevel_surfaces() {
-        send_frames_surface_tree(surface.wl_surface(), now);
+        let wl_surface = surface.wl_surface();
+        // A surface with no entry yet has never been captured, so nobody is
+        // waiting on its frames; it gets one on the next pass.
+        if let Some(tracked) = known.get_mut(&wl_surface.id())
+            && tracked.clock.should_tick(at)
+        {
+            send_frames_surface_tree(wl_surface, now);
+        }
     }
 }
 
@@ -896,8 +938,6 @@ pub fn run_winit(
     // Maps each live surface to its announced id and last announced size.
     let mut known: HashMap<_, Tracked> = HashMap::new();
     let mut next_surface_id: u64 = 0;
-    let mut clock = FrameClock::new();
-
     loop {
         let status = winit.dispatch_new_events(|event| match event {
             WinitEvent::Input(BackendInputEvent::Keyboard { event }) => {
@@ -926,7 +966,7 @@ pub fn run_winit(
         drain_client(
             &mut state,
             &mut poll_client,
-            &mut clock,
+            &mut known,
             &keyboard,
             &pointer,
             start_time,
@@ -971,7 +1011,7 @@ pub fn run_winit(
             &mut known,
             &mut next_surface_id,
         );
-        tick_frame_callbacks(&state, start_time, &mut clock);
+        tick_frame_callbacks(&state, &mut known, start_time);
 
         if let Some(stream) = listener.accept()? {
             let client = display
@@ -1080,8 +1120,6 @@ pub fn run_headless(
     let mut clients = Vec::new();
     let mut known: HashMap<ObjectId, Tracked> = HashMap::new();
     let mut next_surface_id: u64 = 0;
-    let mut clock = FrameClock::new();
-
     loop {
         if let Some(stream) = listener.accept()? {
             let client = display
@@ -1094,7 +1132,7 @@ pub fn run_headless(
         drain_client(
             &mut state,
             &mut poll_client,
-            &mut clock,
+            &mut known,
             &keyboard,
             &pointer,
             start_time,
@@ -1106,7 +1144,7 @@ pub fn run_headless(
             &mut known,
             &mut next_surface_id,
         );
-        tick_frame_callbacks(&state, start_time, &mut clock);
+        tick_frame_callbacks(&state, &mut known, start_time);
 
         display.flush_clients()?;
         std::thread::sleep(std::time::Duration::from_millis(16));

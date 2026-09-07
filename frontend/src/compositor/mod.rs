@@ -12,6 +12,10 @@ use webland_protocol::{Codec, ServerMessage, SurfaceFrame, inflate};
 use crate::gpu::GpuRenderer;
 
 /// The active render path: WebGPU when available, else the 2D canvas.
+///
+/// `Gpu` is unreachable until [`crate::gpu`] is wired back into the scene; see
+/// the note there.
+#[allow(dead_code)]
 pub enum Renderer {
     Gpu(Box<GpuRenderer>),
     Canvas(SurfaceRenderer),
@@ -74,6 +78,8 @@ impl SurfaceRenderer {
                 }
             }
             ServerMessage::SurfaceFrame(frame) => self.draw(&frame),
+            // The scene owns surface lifetime; a renderer only ever draws.
+            ServerMessage::SurfaceDestroyed { .. } => {}
         }
     }
 

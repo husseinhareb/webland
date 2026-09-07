@@ -226,8 +226,9 @@ pub fn spawn_server(
                                             // The ack both releases a withheld
                                             // frame here and credits the
                                             // compositor's frame clock.
-                                            Some(ClientMessage::FramePresented) => {
-                                                let _ = client_tx.send(ClientMessage::FramePresented);
+                                            Some(ClientMessage::FramePresented { id }) => {
+                                                let _ =
+                                                    client_tx.send(ClientMessage::FramePresented { id });
                                                 if let Some(frame) = pacer.on_ack()
                                                     && !connection.send(frame)
                                                 {

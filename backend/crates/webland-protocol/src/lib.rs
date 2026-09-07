@@ -121,6 +121,14 @@ pub enum InputEvent {
 pub enum ServerMessage {
     SurfaceCreated(SurfaceCreated),
     SurfaceFrame(SurfaceFrame),
+    /// The surface is gone; the browser should drop its scene node.
+    ///
+    /// Without this a closed window stays on screen forever: the browser has no
+    /// other way to tell "this client exited" from "this surface is idle", and
+    /// idle surfaces are supposed to cost nothing.
+    SurfaceDestroyed {
+        id: SurfaceId,
+    },
 }
 
 /// Browser → backend. Input plus the frame-pacing ack.
@@ -128,10 +136,15 @@ pub enum ServerMessage {
 pub enum ClientMessage {
     /// Input on its way to a Wayland client.
     Input(InputEvent),
-    /// The browser has presented a frame and is ready for the next one. This is
-    /// what lets the browser drive the frame clock (Decision 3): the server
-    /// holds back until it arrives, so the in-flight queue stays bounded.
-    FramePresented,
+    /// The browser has presented a frame of this surface and is ready for the
+    /// next one. This is what lets the browser drive the frame clock
+    /// (Decision 3): the server holds back until it arrives, so the in-flight
+    /// queue stays bounded.
+    ///
+    /// The surface is named because credit is per surface. A global clock would
+    /// let one busy window spend the callbacks owed to every other one, so three
+    /// applications would pace each other rather than each pacing itself.
+    FramePresented { id: SurfaceId },
     /// Send full contents for every surface on the next frame.
     ///
     /// Frames carry only damaged regions, so a browser joining mid-stream has

@@ -27,7 +27,7 @@ wgpu = { version = "30", default-features = false, features = ["webgpu", "wgsl"]
 version = "0.3"
 # Widened as the frontend reaches for WebCodecs and WebGPU.
 features = [
-    "Window", "Document", "Element", "EventTarget",
+    "Window", "Document", "Element", "EventTarget", "DomRect", "CssStyleDeclaration",
     "WebSocket", "BinaryType", "MessageEvent", "Event",
     "HtmlCanvasElement", "CanvasRenderingContext2d", "ImageData",
     "PointerEvent", "MouseEvent", "KeyboardEvent",

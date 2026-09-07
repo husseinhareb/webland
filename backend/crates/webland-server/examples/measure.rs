@@ -107,7 +107,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Err(()) => unapplicable += 1,
                         }
                         socket
-                            .send(Message::Binary(encode(&ClientMessage::FramePresented)?))
+                            .send(Message::Binary(encode(&ClientMessage::FramePresented {
+                                id: frame.id,
+                            })?))
                             .await?;
                         if checking && (verdict.starts_with("reconstruct") || encoded > 0) {
                             break;

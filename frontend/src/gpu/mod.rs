@@ -7,6 +7,15 @@
 //!
 //! Falls back to the 2D canvas (see [`crate::compositor`]) when WebGPU is
 //! unavailable; construction returns `Err` in that case.
+//!
+//! ponytail: nothing constructs this at the moment. The Phase 4 scene builds a
+//! renderer per surface, and doing that here wants one `wgpu::Device` shared
+//! between surfaces rather than a device each — a refactor worth writing when it
+//! can be run. WebGPU has never actually executed on the development machine
+//! (Chromium there has no Vulkan, so `request_adapter` finds nothing), and
+//! rewriting an untested path blind is how it stays untested. Enable
+//! `chrome://flags/#enable-vulkan`, then wire this into `scene::Scene::ensure`.
+#![allow(dead_code)]
 
 use web_sys::{HtmlCanvasElement, VideoFrame};
 use webland_protocol::{Codec, ServerMessage, SurfaceFrame, inflate};
@@ -177,6 +186,8 @@ impl GpuRenderer {
                 self.resize(created.size.width, created.size.height);
             }
             ServerMessage::SurfaceFrame(frame) => self.draw(&frame),
+            // The scene owns surface lifetime; a renderer only ever draws.
+            ServerMessage::SurfaceDestroyed { .. } => {}
         }
     }
 

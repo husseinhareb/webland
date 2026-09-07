@@ -11,6 +11,7 @@ mod gpu;
 mod input;
 mod latency;
 mod protocol;
+mod scene;
 
 use desktop::Desktop;
 

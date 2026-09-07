@@ -7,17 +7,15 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use leptos::html::Canvas;
+use leptos::html::Div;
 use leptos::prelude::*;
-use web_sys::HtmlCanvasElement;
+use web_sys::Element;
 
-use crate::compositor::{Renderer, SurfaceRenderer};
-use crate::decode::Decoder;
-use crate::gpu::GpuRenderer;
 use crate::latency::Latency;
 use crate::protocol::{
-    ClientMessage, Codec, ServerMessage, Transport, WebSocketTransport, decode, encode,
+    ClientMessage, ServerMessage, Transport, WebSocketTransport, decode, encode,
 };
+use crate::scene::Scene;
 
 /// Backend WebSocket endpoint. Run the backend with `WEBLAND_WS=127.0.0.1:9001`
 /// to match (localhost only until the protocol has authentication).
@@ -26,59 +24,28 @@ const BACKEND: &str = "ws://127.0.0.1:9001";
 #[component]
 pub fn Desktop() -> impl IntoView {
     let status = RwSignal::new(String::from("connecting…"));
-    let canvas_ref: NodeRef<Canvas> = NodeRef::new();
+    let scene_ref: NodeRef<Div> = NodeRef::new();
 
     // Connect only once the canvas is actually in the DOM (the ref fills on
     // mount, which re-runs this effect); avoids a cold-load race.
     Effect::new(move |_| {
-        if let Some(canvas) = canvas_ref.get() {
-            connect_and_render(status, canvas);
+        if let Some(container) = scene_ref.get() {
+            connect_and_render(status, container.into());
         }
     });
 
     view! {
         <main>
             <p class="status">{move || status.get()}</p>
-            <canvas node_ref=canvas_ref id="webland-surface"></canvas>
+            <div node_ref=scene_ref id="webland-scene"></div>
         </main>
     }
 }
 
-fn connect_and_render(status: RwSignal<String>, canvas: HtmlCanvasElement) {
-    // WebGPU init is async; do it (and the fallback) before wiring the socket.
-    wasm_bindgen_futures::spawn_local(async move {
-        let renderer = match GpuRenderer::new(canvas.clone()).await {
-            Ok(gpu) => Renderer::Gpu(Box::new(gpu)),
-            Err(err) => {
-                // Name the fix: wgpu's own error says which stage failed but not
-                // that both browsers gate WebGPU behind a setting on Linux.
-                web_sys::console::warn_1(
-                    &format!(
-                        "WebGPU unavailable ({err}); using the 2D canvas. \
-                         Firefox: set dom.webgpu.enabled in about:config. \
-                         Chromium: enable chrome://flags/#enable-vulkan \
-                         (or launch with --enable-features=Vulkan --use-angle=vulkan)."
-                    )
-                    .into(),
-                );
-                match SurfaceRenderer::new(canvas.clone()) {
-                    Ok(canvas2d) => Renderer::Canvas(canvas2d),
-                    Err(_) => {
-                        status.set(String::from("no renderer available"));
-                        return;
-                    }
-                }
-            }
-        };
-        wire_transport(status, canvas, Rc::new(RefCell::new(renderer)));
-    });
-}
+fn connect_and_render(status: RwSignal<String>, container: Element) {
+    let latency = Rc::new(Latency::new());
+    let scene = Rc::new(RefCell::new(Scene::new(container.clone(), latency.clone())));
 
-fn wire_transport(
-    status: RwSignal<String>,
-    canvas: HtmlCanvasElement,
-    renderer: Rc<RefCell<Renderer>>,
-) {
     let transport = match WebSocketTransport::connect(BACKEND) {
         Ok(transport) => Rc::new(transport),
         Err(_) => {
@@ -87,7 +54,7 @@ fn wire_transport(
         }
     };
 
-    // Frames carry only damaged pixels, so a mid-stream joiner needs one full
+    // Frames carry only what changed, so a mid-stream joiner needs one full
     // surface to patch into; asking on connect is what keeps an idle desktop
     // from costing anything at all.
     let opened = transport.clone();
@@ -104,63 +71,29 @@ fn wire_transport(
         ));
     }));
 
-    // Click-to-photon is closed where a frame actually reaches the screen, which
-    // for H.264 is inside the decoder callback rather than on message receipt.
-    let latency = Rc::new(Latency::new());
-
-    // Decoded frames come back asynchronously, so the decoder draws into the
-    // renderer itself rather than returning pixels to the message handler.
-    let drawing = renderer.clone();
-    let drawn = latency.clone();
-    let decoder = Decoder::new(move |frame| {
-        drawing.borrow_mut().draw_video_frame(frame);
-        drawn.frame_drawn();
-    })
-    .ok();
-    if decoder.is_none() {
-        web_sys::console::warn_1(
-            &"no WebCodecs VideoDecoder; H.264 surfaces will not render".into(),
-        );
-    }
-
     // Cloned into the handler so we can ack each presented frame (Decision 3:
     // the browser drives the frame clock). This Rc keeps the socket alive.
     let ack = transport.clone();
     let timing = latency.clone();
-    let size = std::cell::Cell::new((0u32, 0u32));
+    let painting = scene.clone();
     transport.on_message(Box::new(move |bytes| {
         let Ok(message) = decode::<ServerMessage>(&bytes) else {
             return;
         };
-        let is_frame = matches!(message, ServerMessage::SurfaceFrame(_));
-        // The decoder needs the surface dimensions, which only ever arrive here.
-        if let ServerMessage::SurfaceCreated(created) = &message {
-            size.set((created.size.width, created.size.height));
-        }
-        match (&message, decoder.as_ref()) {
-            // H.264 goes to WebCodecs; the renderer sees it again as a
-            // VideoFrame once the decoder is done with it.
-            (ServerMessage::SurfaceFrame(frame), Some(decoder)) if frame.codec == Codec::H264 => {
-                let (width, height) = size.get();
-                decoder.decode(&frame.payload, width, height);
-            }
-            _ => {
-                renderer.borrow_mut().handle(message);
-                if is_frame {
-                    timing.frame_drawn();
-                }
-            }
-        }
-        if is_frame {
-            // Phase 2 is measured, not felt, and so is this: show the number
-            // rather than leaving the status line blank once frames arrive.
+        // Acks name their surface, so the compositor can pace each one on its
+        // own rather than letting a busy window spend everyone's credit.
+        let presented = match &message {
+            ServerMessage::SurfaceFrame(frame) => Some(frame.id),
+            _ => None,
+        };
+        painting.borrow_mut().handle(message);
+        if let Some(id) = presented {
             status.set(timing.summary().unwrap_or_default());
-            if let Ok(frame) = encode(&ClientMessage::FramePresented) {
+            if let Ok(frame) = encode(&ClientMessage::FramePresented { id }) {
                 ack.send(&frame);
             }
         }
     }));
 
-    // Stream browser input to the backend (Phase 3).
-    crate::input::wire(&canvas, transport, latency);
+    crate::input::wire(&container, transport, latency, scene);
 }
