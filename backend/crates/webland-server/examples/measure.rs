@@ -58,6 +58,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut unapplicable = 0u64;
     // Set once the closing keyframe has been compared against our own copy.
     let mut verdict = String::from("no keyframe to check against");
+    // H.264 frames carry no damage and are not reconstructable here: checking
+    // them would mean decoding video, which is the browser's job.
+    let mut encoded = 0u64;
 
     let deadline = tokio::time::sleep(Duration::from_secs(seconds));
     tokio::pin!(deadline);
@@ -90,6 +93,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     Ok(ServerMessage::SurfaceFrame(frame)) => {
                         frames += 1;
+                        if frame.codec == Codec::H264 {
+                            encoded += 1;
+                        }
                         pixels += frame
                             .damage
                             .iter()
@@ -103,7 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         socket
                             .send(Message::Binary(encode(&ClientMessage::FramePresented)?))
                             .await?;
-                        if checking && verdict.starts_with("reconstruct") {
+                        if checking && (verdict.starts_with("reconstruct") || encoded > 0) {
                             break;
                         }
                     }
@@ -126,7 +132,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             pixels_f / frames_f
         },
     );
-    println!("{unapplicable} unapplicable frames, {verdict}");
+    if encoded > 0 {
+        println!("{encoded} of {frames} frames were H.264 (bitrate above is the real number)");
+        println!("{unapplicable} unapplicable frames, damage reconstruction n/a for video");
+    } else {
+        println!("{unapplicable} unapplicable frames, {verdict}");
+    }
     Ok(())
 }
 

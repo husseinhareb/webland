@@ -86,8 +86,10 @@ fn surface_position(canvas: &HtmlCanvasElement, event: &PointerEvent) -> Option<
         return None;
     }
     Some(Point {
-        x: f64::from(event.offset_x()) * f64::from(canvas.width()) / displayed_w,
-        y: f64::from(event.offset_y()) * f64::from(canvas.height()) / displayed_h,
+        // `offset_x`/`offset_y` are already f64 under web-sys's unstable cfg,
+        // which the frontend builds with for WebCodecs.
+        x: event.offset_x() * f64::from(canvas.width()) / displayed_w,
+        y: event.offset_y() * f64::from(canvas.height()) / displayed_h,
     })
 }
 

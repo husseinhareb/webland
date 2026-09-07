@@ -5,6 +5,7 @@
 //! format cannot drift between the two sides.
 
 mod compositor;
+mod decode;
 mod desktop;
 mod gpu;
 mod input;

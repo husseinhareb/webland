@@ -6,7 +6,7 @@
 //! to end before the GPU pipeline exists.
 
 use wasm_bindgen::{Clamped, JsCast, JsValue};
-use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData};
+use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData, VideoFrame};
 use webland_protocol::{Codec, ServerMessage, SurfaceFrame, inflate};
 
 use crate::gpu::GpuRenderer;
@@ -23,6 +23,14 @@ impl Renderer {
         match self {
             Renderer::Gpu(renderer) => renderer.handle(message),
             Renderer::Canvas(renderer) => renderer.handle(message),
+        }
+    }
+
+    /// Draw a frame that came back from the video decoder.
+    pub fn draw_video_frame(&mut self, frame: &VideoFrame) {
+        match self {
+            Renderer::Gpu(renderer) => renderer.draw_video_frame(frame),
+            Renderer::Canvas(renderer) => renderer.draw_video_frame(frame),
         }
     }
 }
@@ -69,6 +77,11 @@ impl SurfaceRenderer {
         }
     }
 
+    /// Blit a decoded video frame. The browser does the colour conversion.
+    pub fn draw_video_frame(&self, frame: &VideoFrame) {
+        let _ = self.ctx.draw_image_with_video_frame(frame, 0.0, 0.0);
+    }
+
     fn draw(&self, frame: &SurfaceFrame) {
         // Recover raw BGRA pixels. H.264 belongs to the WebCodecs path, not here.
         let mut rgba = match frame.codec {
@@ -104,9 +117,7 @@ impl SurfaceRenderer {
         if let Ok(image) =
             ImageData::new_with_u8_clamped_array_and_sh(Clamped(&rgba), region.width, region.height)
         {
-            let _ = self
-                .ctx
-                .put_image_data(&image, f64::from(region.x), f64::from(region.y));
+            let _ = self.ctx.put_image_data(&image, region.x, region.y);
         }
     }
 }

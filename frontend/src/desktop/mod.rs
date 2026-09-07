@@ -12,9 +12,10 @@ use leptos::prelude::*;
 use web_sys::HtmlCanvasElement;
 
 use crate::compositor::{Renderer, SurfaceRenderer};
+use crate::decode::Decoder;
 use crate::gpu::GpuRenderer;
 use crate::protocol::{
-    ClientMessage, ServerMessage, Transport, WebSocketTransport, decode, encode,
+    ClientMessage, Codec, ServerMessage, Transport, WebSocketTransport, decode, encode,
 };
 
 /// Backend WebSocket endpoint. Run the backend with `WEBLAND_WS=127.0.0.1:9001`
@@ -102,9 +103,20 @@ fn wire_transport(
         ));
     }));
 
+    // Decoded frames come back asynchronously, so the decoder draws into the
+    // renderer itself rather than returning pixels to the message handler.
+    let drawing = renderer.clone();
+    let decoder = Decoder::new(move |frame| drawing.borrow_mut().draw_video_frame(frame)).ok();
+    if decoder.is_none() {
+        web_sys::console::warn_1(
+            &"no WebCodecs VideoDecoder; H.264 surfaces will not render".into(),
+        );
+    }
+
     // Cloned into the handler so we can ack each presented frame (Decision 3:
     // the browser drives the frame clock). This Rc keeps the socket alive.
     let ack = transport.clone();
+    let size = std::cell::Cell::new((0u32, 0u32));
     transport.on_message(Box::new(move |bytes| {
         let Ok(message) = decode::<ServerMessage>(&bytes) else {
             return;
@@ -113,7 +125,19 @@ fn wire_transport(
         if is_frame {
             status.set(String::new());
         }
-        renderer.borrow_mut().handle(message);
+        // The decoder needs the surface dimensions, which only ever arrive here.
+        if let ServerMessage::SurfaceCreated(created) = &message {
+            size.set((created.size.width, created.size.height));
+        }
+        match (&message, decoder.as_ref()) {
+            // H.264 goes to WebCodecs; the renderer sees it again as a
+            // VideoFrame once the decoder is done with it.
+            (ServerMessage::SurfaceFrame(frame), Some(decoder)) if frame.codec == Codec::H264 => {
+                let (width, height) = size.get();
+                decoder.decode(&frame.payload, width, height);
+            }
+            _ => renderer.borrow_mut().handle(message),
+        }
         if is_frame && let Ok(frame) = encode(&ClientMessage::FramePresented) {
             ack.send(&frame);
         }

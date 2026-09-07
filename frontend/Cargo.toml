@@ -31,6 +31,8 @@ features = [
     "WebSocket", "BinaryType", "MessageEvent", "Event",
     "HtmlCanvasElement", "CanvasRenderingContext2d", "ImageData",
     "PointerEvent", "MouseEvent", "KeyboardEvent",
+    "VideoDecoder", "VideoDecoderConfig", "VideoDecoderInit", "VideoFrame",
+    "EncodedVideoChunk", "EncodedVideoChunkInit", "EncodedVideoChunkType",
     "console",
 ]
 

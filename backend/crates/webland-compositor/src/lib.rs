@@ -412,8 +412,7 @@ fn configured_size() -> (i32, i32) {
 /// without one, they are just the slow path. `--example gpu_probe` is the quick
 /// way to find out why this failed.
 fn open_gpu() -> Option<(GlesRenderer, u64)> {
-    let path = std::env::var("WEBLAND_RENDER_NODE")
-        .unwrap_or_else(|_| String::from("/dev/dri/renderD128"));
+    let path = render_node();
     let open = || -> Result<(GlesRenderer, u64), Box<dyn std::error::Error>> {
         let file = std::fs::File::options()
             .read(true)
@@ -592,7 +591,11 @@ struct Tracked {
     /// nothing to skip.
     commit: Option<CommitCounter>,
     /// The pixels the browser is holding, to diff the next capture against.
+    /// Only the deflate path needs these; H.264 keeps its own reference frames.
     pixels: Vec<u8>,
+    /// Built on first use and thrown away on resize, since both the filter graph
+    /// and the encoder bake the dimensions in.
+    encoder: Option<encode::Encoder>,
 }
 
 /// Capture changed surfaces and emit their frames to the browser transport.
@@ -626,6 +629,7 @@ fn stream_dirty(
                 size: None,
                 commit: None,
                 pixels: Vec::new(),
+                encoder: None,
             }
         });
         let Some(commit) = with_renderer_surface_state(surface, |s| s.current_commit()) else {
@@ -643,19 +647,48 @@ fn stream_dirty(
         tracked.commit = Some(commit);
 
         // A resize invalidates whatever the browser is holding, and so does a
-        // browser that has just joined: both take the whole surface.
+        // browser that has just joined: both take the whole surface, and both
+        // invalidate the video stream the browser was decoding.
+        let announced = keyframe || tracked.size != Some(size);
+        if announced {
+            tracked.size = Some(size);
+            tracked.encoder = None;
+            emit(ServerMessage::SurfaceCreated(SurfaceCreated {
+                id: tracked.id,
+                size,
+            }));
+        }
+
+        // H.264 first: it is the only codec that gets a scrolling terminal into
+        // a sane bitrate (gate 4). Damage is empty on this path — the encoder
+        // decides for itself what changed, and says so far better than a
+        // bounding box can.
+        if tracked.encoder.is_none() {
+            match encode::Encoder::new(&render_node(), size.width, size.height, bitrate()) {
+                Ok(encoder) => tracked.encoder = Some(encoder),
+                Err(err) => tracing::debug!(%err, "no H.264 encoder; sending deflate"),
+            }
+        }
+        if let Some(encoder) = tracked.encoder.as_mut()
+            && let Some(payload) = encoder.encode(&pixels, announced)
+        {
+            emit(ServerMessage::SurfaceFrame(SurfaceFrame {
+                id: tracked.id,
+                codec: Codec::H264,
+                damage: Vec::new(),
+                payload,
+            }));
+            continue;
+        }
+
+        // No encoder: deflate the region that changed.
         let whole = Rect {
             x: 0,
             y: 0,
             width: size.width,
             height: size.height,
         };
-        let region = if keyframe || tracked.size != Some(size) {
-            tracked.size = Some(size);
-            emit(ServerMessage::SurfaceCreated(SurfaceCreated {
-                id: tracked.id,
-                size,
-            }));
+        let region = if announced {
             whole
         } else {
             match changed_region(&tracked.pixels, &pixels, size) {
@@ -675,6 +708,20 @@ fn stream_dirty(
             payload: webland_protocol::deflate(&payload),
         }));
     }
+}
+
+/// The render node to open, for both the dmabuf global and the encoder.
+fn render_node() -> String {
+    std::env::var("WEBLAND_RENDER_NODE").unwrap_or_else(|_| String::from("/dev/dri/renderD128"))
+}
+
+/// Encoder target bitrate. A desktop is mostly still, so the encoder spends far
+/// less than this in practice; it is a ceiling for the worst case.
+fn bitrate() -> i64 {
+    std::env::var("WEBLAND_BITRATE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8_000_000)
 }
 
 /// Fire frame callbacks so every mapped client renders its next frame — but only

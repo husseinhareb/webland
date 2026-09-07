@@ -8,7 +8,7 @@
 //! Falls back to the 2D canvas (see [`crate::compositor`]) when WebGPU is
 //! unavailable; construction returns `Err` in that case.
 
-use web_sys::HtmlCanvasElement;
+use web_sys::{HtmlCanvasElement, VideoFrame};
 use webland_protocol::{Codec, ServerMessage, SurfaceFrame, inflate};
 
 const SHADER: &str = r"
@@ -244,6 +244,44 @@ impl GpuRenderer {
         });
     }
 
+    /// Copy a decoded video frame into the surface texture and present it.
+    ///
+    /// `copy_external_image_to_texture` is a GPU-to-GPU copy: the decoded frame
+    /// never leaves the GPU, which is the whole point of Decision 2.
+    pub fn draw_video_frame(&mut self, frame: &VideoFrame) {
+        let Some(target) = self.target.as_ref() else {
+            return;
+        };
+        let width = frame.display_width().min(target.width);
+        let height = frame.display_height().min(target.height);
+        if width == 0 || height == 0 {
+            return;
+        }
+        self.queue.copy_external_image_to_texture(
+            &wgpu::CopyExternalImageSourceInfo {
+                // `Clone::clone`, spelled out: VideoFrame has its own JS `clone()`
+                // method that returns a Result and would be picked up instead.
+                source: wgpu::ExternalImageSource::VideoFrame(Clone::clone(frame)),
+                origin: wgpu::Origin2d::ZERO,
+                flip_y: false,
+            },
+            wgpu::CopyExternalImageDestInfo {
+                texture: &target.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+                color_space: wgpu::PredefinedColorSpace::Srgb,
+                premultiplied_alpha: false,
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.present();
+    }
+
     fn draw(&mut self, frame: &SurfaceFrame) {
         let pixels = match frame.codec {
             Codec::Raw => frame.payload.clone(),
@@ -297,6 +335,14 @@ impl GpuRenderer {
             },
         );
 
+        self.present();
+    }
+
+    /// Blit the surface texture to the canvas.
+    fn present(&mut self) {
+        let Some(target) = self.target.as_ref() else {
+            return;
+        };
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
             | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,

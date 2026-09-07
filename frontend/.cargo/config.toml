@@ -1,0 +1,4 @@
+# WebCodecs is still behind web-sys's unstable gate; the frontend needs
+# VideoDecoder to play the H.264 the compositor sends (Decision 2).
+[build]
+rustflags = ["--cfg=web_sys_unstable_apis"]

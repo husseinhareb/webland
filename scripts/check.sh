@@ -7,6 +7,11 @@ cargo fmt --manifest-path backend/Cargo.toml --all --check
 cargo clippy --manifest-path backend/Cargo.toml --workspace --all-targets -- -D warnings
 cargo test --manifest-path backend/Cargo.toml --workspace
 
-cargo fmt --manifest-path frontend/Cargo.toml --all --check
-cargo clippy --manifest-path frontend/Cargo.toml --target wasm32-unknown-unknown --all-targets -- -D warnings
-(cd frontend && trunk build)
+# From inside frontend/, not by --manifest-path: cargo reads .cargo/config.toml
+# from the working directory, and that is where the WebCodecs cfg lives.
+(
+  cd frontend
+  cargo fmt --all --check
+  cargo clippy --target wasm32-unknown-unknown --all-targets -- -D warnings
+  trunk build
+)
