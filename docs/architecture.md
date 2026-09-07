@@ -27,9 +27,11 @@ user's display
 | --- | --- |
 | `desktop/` | Shell UI: panels, dock, launcher, settings, notifications |
 | `compositor/` | Places application surfaces in the desktop scene |
+| `decode/` | WebCodecs H.264 decode, configured from the stream's own SPS |
 | `gpu/` | WebGPU device and render pipelines |
+| `input/` | Browser events to Wayland input, including modifier reconciliation |
+| `latency/` | Click-to-photon timing, the number Phase 3 is judged on |
 | `protocol/` | Transport seam and codec |
-| `wasm/` | Notes on hand-tuned WebAssembly beyond what Leptos already emits |
 
 ## Decisions
 
@@ -50,3 +52,18 @@ The reasoning behind these, and the order they get built in, is in
 - **`smithay` for the compositor**, pulled in with default features off so the
   skeleton builds without DRM/libinput/udev system libraries. Backend features
   get enabled when a real backend is written.
+- **Full keyboard access is opt-in, not required.** Browsers reserve `Ctrl+W`,
+  `Ctrl+T`, `F11` and friends, and the only way to get them is the Keyboard Lock
+  API, which needs fullscreen, HTTPS and Chromium. Webland does not require that:
+  it runs in an ordinary tab, where the browser keeps the keys it reserves, and
+  asks for Keyboard Lock only when the user goes fullscreen and the API exists.
+  Requiring it would narrow the project to one browser in one mode to win a
+  handful of shortcuts, which is the wrong trade for everything else that works
+  in any tab. The cost is that those shortcuts reach the browser rather than the
+  application until the user goes fullscreen, and that is worth saying out loud
+  rather than treating as a bug.
+
+  Modifier state is reconciled per event against `getModifierState` rather than
+  tracked from keydowns alone, because the browser eating one keydown would
+  otherwise leave a modifier stuck down for the client — the failure this
+  decision makes more likely, and cheap to defend against.

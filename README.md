@@ -110,6 +110,10 @@ Frame rate tracks the load rather than a clock, which is the point of pacing on
 browser acks. The bandwidth is H.264 doing the job deflate could not: the same
 scrolling terminal cost ~47 Mbit/s as deflated damage rectangles.
 
+Click-to-photon is measured in the browser and shown above the surface, since
+both ends of it — the input and the frame it causes — happen there, so the page
+clock is already the shared one. Typing currently lands around **52 ms median**.
+
 Linux-first and Wayland-first. Xorg is not a target; X11 applications would be
 handled through XWayland later, if at all.
 
