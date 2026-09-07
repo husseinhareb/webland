@@ -14,6 +14,7 @@ use web_sys::HtmlCanvasElement;
 use crate::compositor::{Renderer, SurfaceRenderer};
 use crate::decode::Decoder;
 use crate::gpu::GpuRenderer;
+use crate::latency::Latency;
 use crate::protocol::{
     ClientMessage, Codec, ServerMessage, Transport, WebSocketTransport, decode, encode,
 };
@@ -103,10 +104,19 @@ fn wire_transport(
         ));
     }));
 
+    // Click-to-photon is closed where a frame actually reaches the screen, which
+    // for H.264 is inside the decoder callback rather than on message receipt.
+    let latency = Rc::new(Latency::new());
+
     // Decoded frames come back asynchronously, so the decoder draws into the
     // renderer itself rather than returning pixels to the message handler.
     let drawing = renderer.clone();
-    let decoder = Decoder::new(move |frame| drawing.borrow_mut().draw_video_frame(frame)).ok();
+    let drawn = latency.clone();
+    let decoder = Decoder::new(move |frame| {
+        drawing.borrow_mut().draw_video_frame(frame);
+        drawn.frame_drawn();
+    })
+    .ok();
     if decoder.is_none() {
         web_sys::console::warn_1(
             &"no WebCodecs VideoDecoder; H.264 surfaces will not render".into(),
@@ -116,15 +126,13 @@ fn wire_transport(
     // Cloned into the handler so we can ack each presented frame (Decision 3:
     // the browser drives the frame clock). This Rc keeps the socket alive.
     let ack = transport.clone();
+    let timing = latency.clone();
     let size = std::cell::Cell::new((0u32, 0u32));
     transport.on_message(Box::new(move |bytes| {
         let Ok(message) = decode::<ServerMessage>(&bytes) else {
             return;
         };
         let is_frame = matches!(message, ServerMessage::SurfaceFrame(_));
-        if is_frame {
-            status.set(String::new());
-        }
         // The decoder needs the surface dimensions, which only ever arrive here.
         if let ServerMessage::SurfaceCreated(created) = &message {
             size.set((created.size.width, created.size.height));
@@ -136,13 +144,23 @@ fn wire_transport(
                 let (width, height) = size.get();
                 decoder.decode(&frame.payload, width, height);
             }
-            _ => renderer.borrow_mut().handle(message),
+            _ => {
+                renderer.borrow_mut().handle(message);
+                if is_frame {
+                    timing.frame_drawn();
+                }
+            }
         }
-        if is_frame && let Ok(frame) = encode(&ClientMessage::FramePresented) {
-            ack.send(&frame);
+        if is_frame {
+            // Phase 2 is measured, not felt, and so is this: show the number
+            // rather than leaving the status line blank once frames arrive.
+            status.set(timing.summary().unwrap_or_default());
+            if let Ok(frame) = encode(&ClientMessage::FramePresented) {
+                ack.send(&frame);
+            }
         }
     }));
 
     // Stream browser input to the backend (Phase 3).
-    crate::input::wire(&canvas, transport);
+    crate::input::wire(&canvas, transport, latency);
 }

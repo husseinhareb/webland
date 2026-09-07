@@ -14,10 +14,11 @@ use web_sys::{HtmlCanvasElement, KeyboardEvent, PointerEvent};
 use webland_core::Point;
 use webland_protocol::{ClientMessage, InputEvent, Press, encode};
 
+use crate::latency::Latency;
 use crate::protocol::{Transport, WebSocketTransport};
 
 /// Attach pointer (canvas) and keyboard (window) listeners that stream input.
-pub fn wire(canvas: &HtmlCanvasElement, transport: Rc<WebSocketTransport>) {
+pub fn wire(canvas: &HtmlCanvasElement, transport: Rc<WebSocketTransport>, latency: Rc<Latency>) {
     // Pointer motion.
     {
         let transport = transport.clone();
@@ -35,8 +36,12 @@ pub fn wire(canvas: &HtmlCanvasElement, transport: Rc<WebSocketTransport>) {
     // Pointer buttons.
     for (name, press) in [("pointerdown", Press::Down), ("pointerup", Press::Up)] {
         let transport = transport.clone();
+        let latency = latency.clone();
         let listener = Closure::<dyn FnMut(PointerEvent)>::new(move |event: PointerEvent| {
             if let Some(button) = evdev_button(event.button()) {
+                if press == Press::Down {
+                    latency.input_sent();
+                }
                 send(
                     &transport,
                     InputEvent::PointerButton {
@@ -59,10 +64,14 @@ pub fn wire(canvas: &HtmlCanvasElement, transport: Rc<WebSocketTransport>) {
         for (name, press) in [("keydown", Press::Down), ("keyup", Press::Up)] {
             let transport = transport.clone();
             let held = held.clone();
+            let latency = latency.clone();
             let listener = Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
                 let Some(keycode) = evdev_key(&event.code()) else {
                     return;
                 };
+                if press == Press::Down {
+                    latency.input_sent();
+                }
                 reconcile_modifiers(&transport, &held, &event, keycode);
                 send(
                     &transport,

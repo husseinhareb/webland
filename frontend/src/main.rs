@@ -9,6 +9,7 @@ mod decode;
 mod desktop;
 mod gpu;
 mod input;
+mod latency;
 mod protocol;
 
 use desktop::Desktop;
