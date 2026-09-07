@@ -40,7 +40,7 @@ use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::gbm::GbmDevice;
 pub mod encode;
 
-use smithay::backend::allocator::{Buffer, Fourcc};
+use smithay::backend::allocator::{Buffer, Fourcc, Modifier};
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::input::{
     ButtonState, InputEvent as BackendInputEvent, KeyState, KeyboardKeyEvent, Keycode,
@@ -445,6 +445,39 @@ fn open_gpu() -> Option<(GlesRenderer, u64)> {
     }
 }
 
+/// What a client's dmabuf looks like to the encoder: fds and their layout, and
+/// nothing that requires reading a single pixel.
+struct Planes {
+    size: Size,
+    fourcc: u32,
+    modifier: u64,
+    /// `(fd, offset, stride)`, one per plane.
+    layout: Vec<(i32, u32, u32)>,
+}
+
+/// Describe a surface's committed dmabuf, if it committed one.
+fn dmabuf_planes(surface: &WlSurface) -> Option<Planes> {
+    let buffer = with_renderer_surface_state(surface, |s| s.buffer().cloned())??;
+    let dmabuf = get_dmabuf(&buffer).ok()?;
+    let format = dmabuf.format();
+    let planes = dmabuf
+        .handles()
+        .map(|fd| std::os::fd::AsRawFd::as_raw_fd(&fd))
+        .zip(dmabuf.offsets())
+        .zip(dmabuf.strides())
+        .map(|((fd, offset), stride)| (fd, offset, stride))
+        .collect();
+    Some(Planes {
+        size: Size {
+            width: dmabuf.width(),
+            height: dmabuf.height(),
+        },
+        fourcc: format.code as u32,
+        modifier: u64::from(format.modifier),
+        layout: planes,
+    })
+}
+
 /// Copy a surface's committed contents, tightly packed, whichever kind of buffer
 /// the client committed.
 fn capture(renderer: Option<&mut GlesRenderer>, surface: &WlSurface) -> Option<(Size, Vec<u8>)> {
@@ -638,12 +671,20 @@ fn stream_dirty(
         if tracked.commit == Some(commit) && !keyframe {
             continue;
         }
-        let Some((size, pixels)) = capture(renderer.as_deref_mut(), surface) else {
-            continue;
+        // Prefer the client's own GPU buffer: its dimensions are known without
+        // reading it, so an encodable surface never gets copied at all.
+        let dmabuf = dmabuf_planes(surface);
+        let mut pixels = None;
+        let size = match &dmabuf {
+            Some(planes) => planes.size,
+            None => match capture(renderer.as_deref_mut(), surface) {
+                Some((size, captured)) if !captured.is_empty() => {
+                    pixels = Some(captured);
+                    size
+                }
+                _ => continue,
+            },
         };
-        if pixels.is_empty() {
-            continue;
-        }
         tracked.commit = Some(commit);
 
         // A resize invalidates whatever the browser is holding, and so does a
@@ -663,25 +704,64 @@ fn stream_dirty(
         // a sane bitrate (gate 4). Damage is empty on this path — the encoder
         // decides for itself what changed, and says so far better than a
         // bounding box can.
+        let wanted = if dmabuf.is_some() {
+            encode::Input::Dmabuf
+        } else {
+            encode::Input::Cpu
+        };
+        // A client that switches buffer kinds needs a different graph entirely.
+        if tracked
+            .encoder
+            .as_ref()
+            .is_some_and(|e| e.input() != wanted)
+        {
+            tracked.encoder = None;
+        }
         if tracked.encoder.is_none() {
-            match encode::Encoder::new(&render_node(), size.width, size.height, bitrate()) {
+            let (fourcc, modifier) = dmabuf
+                .as_ref()
+                .map_or((0, 0), |planes| (planes.fourcc, planes.modifier));
+            match encode::Encoder::new(
+                &render_node(),
+                size.width,
+                size.height,
+                bitrate(),
+                wanted,
+                fourcc,
+                modifier,
+            ) {
                 Ok(encoder) => tracked.encoder = Some(encoder),
                 Err(err) => tracing::debug!(%err, "no H.264 encoder; sending deflate"),
             }
         }
-        if let Some(encoder) = tracked.encoder.as_mut()
-            && let Some(payload) = encoder.encode(&pixels, announced)
-        {
-            emit(ServerMessage::SurfaceFrame(SurfaceFrame {
-                id: tracked.id,
-                codec: Codec::H264,
-                damage: Vec::new(),
-                payload,
-            }));
-            continue;
+        if let Some(encoder) = tracked.encoder.as_mut() {
+            let encoded = match &dmabuf {
+                Some(p) => encoder.encode_dmabuf(&p.layout, p.fourcc, p.modifier, announced),
+                None => pixels
+                    .as_ref()
+                    .and_then(|bgra| encoder.encode(bgra, announced)),
+            };
+            if let Some(payload) = encoded {
+                emit(ServerMessage::SurfaceFrame(SurfaceFrame {
+                    id: tracked.id,
+                    codec: Codec::H264,
+                    damage: Vec::new(),
+                    payload,
+                }));
+                continue;
+            }
         }
 
-        // No encoder: deflate the region that changed.
+        // The encoder could not take this frame. Fall back to reading the buffer
+        // back and deflating what changed, which works for anything.
+        let Some(pixels) = pixels
+            .or_else(|| capture(renderer.as_deref_mut(), surface).map(|(_, captured)| captured))
+        else {
+            continue;
+        };
+        if pixels.is_empty() {
+            continue;
+        }
         let whole = Rect {
             x: 0,
             y: 0,
@@ -927,7 +1007,23 @@ pub fn run_headless(
     // which DRM node to open from exactly that: without feedback it gets fd -1,
     // gives up, and the client silently falls back to wl_shm.
     if let Some((renderer, device)) = gpu.as_ref() {
-        let feedback = DmabufFeedbackBuilder::new(*device, renderer.dmabuf_formats()).build()?;
+        // Advertise only what the encoder can actually take. Left to itself Mesa
+        // picks a compressed AMD modifier, which arrives as two planes — pixels
+        // plus DCC metadata — in two buffer objects, and VA-API will only map a
+        // frame made from one. Offering LINEAR alone makes the client allocate
+        // something importable, so the zero-copy path is available at all.
+        //
+        // ponytail: LINEAR is the one modifier certain to work everywhere, at
+        // the cost of the client rendering into an untiled buffer. Querying
+        // VA-API for the tiled modifiers it can import would be faster for the
+        // client and is the upgrade path.
+        let formats: Vec<_> = renderer
+            .dmabuf_formats()
+            .iter()
+            .filter(|format| format.modifier == Modifier::Linear)
+            .copied()
+            .collect();
+        let feedback = DmabufFeedbackBuilder::new(*device, formats).build()?;
         dmabuf_state.create_global_with_default_feedback::<Webland>(&dh, &feedback);
     }
     let mut renderer = gpu.map(|(renderer, _)| renderer);

@@ -5,7 +5,7 @@
 //! with ffmpeg is the other half of the check: a stream that only we can read is
 //! no use to a browser.
 
-use webland_compositor::encode::Encoder;
+use webland_compositor::encode::{Encoder, Input};
 
 fn main() {
     let (w, h) = (1920u32, 1080u32);
@@ -14,7 +14,8 @@ fn main() {
     let out = std::env::args()
         .nth(1)
         .unwrap_or_else(|| String::from("probe.h264"));
-    let mut encoder = Encoder::new(&node, w, h, 8_000_000).expect("encoder");
+    // CPU input: this probe measures the encoder, not the import path.
+    let mut encoder = Encoder::new(&node, w, h, 8_000_000, Input::Cpu, 0, 0).expect("encoder");
 
     let (wide, tall) = (w as usize, h as usize);
     let mut frame = vec![0u8; wide * tall * 4];
