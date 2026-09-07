@@ -28,6 +28,8 @@ pub fn wire(
     // Events are bound on the container and routed by their target, so surfaces
     // that appear later need no wiring of their own.
     let dragging: Rc<Cell<Option<(f64, f64)>>> = Rc::new(Cell::new(None));
+    // The surface the compositor was last told to focus.
+    let focused: Rc<Cell<Option<SurfaceId>>> = Rc::new(Cell::new(None));
     // Pointer motion.
     {
         let transport = transport.clone();
@@ -58,6 +60,7 @@ pub fn wire(
         let latency = latency.clone();
         let scene = scene.clone();
         let dragging = dragging.clone();
+        let focused = focused.clone();
         let listener = Closure::<dyn FnMut(PointerEvent)>::new(move |event: PointerEvent| {
             let Some(canvas) = target_canvas(&event) else {
                 return;
@@ -76,9 +79,14 @@ pub fn wire(
                     dragging.set(grab_offset(&canvas, &event));
                     return;
                 }
-                // Raising is all the browser does here. Telling the compositor
-                // which surface to focus is deliberately not wired; see the note
-                // in the compositor's `drain_client`.
+                // Raising is browser state; focus is the one thing the
+                // compositor needs, and only when it changes.
+                if let Some(id) = id
+                    && focused.replace(Some(id)) != Some(id)
+                    && let Ok(frame) = encode(&ClientMessage::Focus { id })
+                {
+                    transport.send(&frame);
+                }
             } else if dragging.take().is_some() {
                 // The press that started this drag never went to the client, so
                 // neither can the release: a button up with no button down is a

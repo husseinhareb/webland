@@ -145,6 +145,12 @@ pub enum ClientMessage {
     /// let one busy window spend the callbacks owed to every other one, so three
     /// applications would pace each other rather than each pacing itself.
     FramePresented { id: SurfaceId },
+    /// The browser raised this surface; send input there from now on.
+    ///
+    /// Stacking is browser-side state the compositor is never told about. Focus
+    /// is the one part it must know, because there is a single seat and somebody
+    /// has to receive the keystrokes.
+    Focus { id: SurfaceId },
     /// Send full contents for every surface on the next frame.
     ///
     /// Frames carry only damaged regions, so a browser joining mid-stream has

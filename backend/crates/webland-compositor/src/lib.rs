@@ -104,6 +104,8 @@ pub struct Webland {
     /// Set by the browser on connect: send whole surfaces on the next frame,
     /// because a joiner has nothing for a damage rectangle to land on.
     keyframe: bool,
+    /// The surface the browser last raised, which is where input goes.
+    focus: Option<SurfaceId>,
 }
 
 impl BufferHandler for Webland {
@@ -603,27 +605,29 @@ fn drain_client(
                 }
             }
             ClientMessage::RequestKeyframe => state.keyframe = true,
+            ClientMessage::Focus { id } => state.focus = Some(id),
         }
     }
-    // ponytail: input goes to the first surface, not the one the browser
-    // raised. Routing it by focus is written and reverted: sending the
-    // compositor a focus message made kitty report every keystroke as an escape
-    // sequence with a super modifier it was never sent (`\x1b[97;9u` for `a`),
-    // and the cause is not yet understood — the compositor demonstrably injects
-    // the right keycodes and no modifiers, and the same `set_focus` call is made
-    // either way. Shipping half of it would be worse than the limitation.
+    // Input goes to the surface the browser raised; before it has raised
+    // anything, to whichever surface exists.
+    let focused = state.focus.and_then(|id| {
+        known
+            .iter()
+            .find(|(_, tracked)| tracked.id == id)
+            .map(|(object, _)| object.clone())
+    });
+    let toplevels = state.xdg_shell_state.toplevel_surfaces();
+    let target = toplevels
+        .iter()
+        .find(|toplevel| Some(toplevel.wl_surface().id()) == focused)
+        .or_else(|| toplevels.first())
+        .map(|toplevel| toplevel.wl_surface().clone());
     if !events.is_empty()
-        && let Some(surface) = state
-            .xdg_shell_state
-            .toplevel_surfaces()
-            .first()
-            .map(|toplevel| toplevel.wl_surface().clone())
+        && let Some(surface) = target
     {
         let now = start_time.elapsed().as_millis() as u32;
-        // Only when it actually changes. Re-focusing a surface that is already
-        // focused makes smithay resend `enter` and `modifiers`, and a client
-        // that gets those mid-stream concludes a modifier is held — kitty then
-        // reports every keystroke as an escape sequence instead of typing it.
+        // Only when it actually changes: re-focusing what is already focused
+        // makes smithay resend `enter` and `modifiers` for nothing.
         if keyboard.current_focus().as_ref() != Some(&surface) {
             keyboard.set_focus(state, Some(surface.clone()), SERIAL_COUNTER.next_serial());
         }
@@ -901,6 +905,7 @@ pub fn run_winit(
         data_device_state,
         seat,
         keyframe: false,
+        focus: None,
     };
 
     let keyboard = state
@@ -1086,6 +1091,7 @@ pub fn run_headless(
         data_device_state,
         seat,
         keyframe: false,
+        focus: None,
     };
 
     let keyboard = state
