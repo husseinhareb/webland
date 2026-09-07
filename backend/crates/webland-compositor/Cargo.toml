@@ -13,6 +13,7 @@ smithay = { version = "0.7.0", default-features = false, features = ["backend_wi
 webland-core.workspace = true
 webland-protocol.workspace = true
 tracing = "0.1.44"
+ffmpeg-next = "9.0.0"
 
 [lints]
 workspace = true

@@ -38,6 +38,8 @@ use webland_protocol::{
 
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::gbm::GbmDevice;
+pub mod encode;
+
 use smithay::backend::allocator::{Buffer, Fourcc};
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::input::{
