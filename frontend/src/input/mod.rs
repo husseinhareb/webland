@@ -5,6 +5,7 @@
 //! them into the Wayland seat. Keyboard mapping is `KeyboardEvent.code` →
 //! Linux evdev keycode; it covers a common subset, not (yet) IME or every key.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use wasm_bindgen::JsCast;
@@ -51,22 +52,89 @@ pub fn wire(canvas: &HtmlCanvasElement, transport: Rc<WebSocketTransport>) {
 
     // Keyboard, on the window so keys are captured without focusing the canvas.
     if let Some(window) = web_sys::window() {
+        // What the compositor currently believes is held down. The compositor
+        // derives modifier state from key events alone, exactly as a real
+        // keyboard would, so this is the only place the two can drift apart.
+        let held: Rc<RefCell<Vec<u32>>> = Rc::new(RefCell::new(Vec::new()));
         for (name, press) in [("keydown", Press::Down), ("keyup", Press::Up)] {
             let transport = transport.clone();
+            let held = held.clone();
             let listener = Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
-                if let Some(keycode) = evdev_key(&event.code()) {
-                    send(
-                        &transport,
-                        InputEvent::Key {
-                            keycode,
-                            state: press,
-                        },
-                    );
+                let Some(keycode) = evdev_key(&event.code()) else {
+                    return;
+                };
+                reconcile_modifiers(&transport, &held, &event, keycode);
+                send(
+                    &transport,
+                    InputEvent::Key {
+                        keycode,
+                        state: press,
+                    },
+                );
+                // Track the modifier keys themselves, so the reconciliation
+                // above does not re-send what this event already carried.
+                if MODIFIERS.iter().any(|(_, codes)| codes.contains(&keycode)) {
+                    let mut held = held.borrow_mut();
+                    held.retain(|&code| code != keycode);
+                    if press == Press::Down {
+                        held.push(keycode);
+                    }
                 }
             });
             let _ =
                 window.add_event_listener_with_callback(name, listener.as_ref().unchecked_ref());
             listener.forget();
+        }
+    }
+}
+
+/// Modifier name as the browser reports it, and the evdev keycodes that produce
+/// it. Left and right count as the same modifier, because they are.
+const MODIFIERS: [(&str, &[u32]); 4] = [
+    ("Shift", &[42, 54]),
+    ("Control", &[29, 97]),
+    ("Alt", &[56, 100]),
+    ("Meta", &[125, 126]),
+];
+
+/// Send whatever key events the compositor needs to agree with the browser about
+/// which modifiers are held.
+///
+/// Without this a chord only works if we saw the modifier's own keydown, which
+/// is not something to rely on: the browser eats some of them, focus can arrive
+/// mid-chord with a modifier already down, and a synthesised event may carry
+/// `shiftKey` with no `ShiftLeft` event at all. The symptom is a modifier that
+/// silently does nothing, or worse, one that stays stuck down afterwards.
+fn reconcile_modifiers(
+    transport: &WebSocketTransport,
+    held: &Rc<RefCell<Vec<u32>>>,
+    event: &KeyboardEvent,
+    keycode: u32,
+) {
+    for (name, codes) in MODIFIERS {
+        // The event being dispatched is this modifier: it speaks for itself.
+        if codes.contains(&keycode) {
+            continue;
+        }
+        let wanted = event.get_modifier_state(name);
+        let current = held.borrow().iter().any(|code| codes.contains(code));
+        if wanted == current {
+            continue;
+        }
+        // Left-hand keycode by convention; the client cannot tell which it was.
+        let code = codes[0];
+        let state = if wanted { Press::Down } else { Press::Up };
+        send(
+            transport,
+            InputEvent::Key {
+                keycode: code,
+                state,
+            },
+        );
+        let mut held = held.borrow_mut();
+        held.retain(|&existing| !codes.contains(&existing));
+        if wanted {
+            held.push(code);
         }
     }
 }

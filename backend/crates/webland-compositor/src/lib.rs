@@ -863,7 +863,12 @@ pub fn run_winit(
 
     let keyboard = state
         .seat
-        .add_keyboard(Default::default(), 200, 200)
+        // 600ms before repeat, then 25 keys/s. These go to the client verbatim
+        // as wl_keyboard.repeat_info and the client does the repeating, so the
+        // numbers are not ours to be approximate about: the placeholder 200/200
+        // asked for 200 keys a second, and a key-up that took a few frames to
+        // arrive spelled out thirty characters.
+        .add_keyboard(Default::default(), 600, 25)
         .unwrap();
     let pointer = state.seat.add_pointer();
 
@@ -1045,7 +1050,12 @@ pub fn run_headless(
 
     let keyboard = state
         .seat
-        .add_keyboard(Default::default(), 200, 200)
+        // 600ms before repeat, then 25 keys/s. These go to the client verbatim
+        // as wl_keyboard.repeat_info and the client does the repeating, so the
+        // numbers are not ours to be approximate about: the placeholder 200/200
+        // asked for 200 keys a second, and a key-up that took a few frames to
+        // arrive spelled out thirty characters.
+        .add_keyboard(Default::default(), 600, 25)
         .unwrap();
     let pointer = state.seat.add_pointer();
 
