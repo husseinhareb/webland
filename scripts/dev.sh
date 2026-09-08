@@ -6,6 +6,9 @@
 # so the browser is the only display. To see an actual surface, point a Wayland
 # client at it, e.g.:  WEBLAND_SPAWN=kitty ./scripts/dev.sh
 # (unset WEBLAND_HEADLESS to also get a local debug window.)
+#
+# WEBLAND_PORT moves the frontend off 3030 — e.g. onto the homelab's web-shell
+# port to try it where a terminal already lives. Localhost either way.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -13,5 +16,5 @@ trap 'kill 0' EXIT
 WEBLAND_WS="${WEBLAND_WS:-127.0.0.1:9001}" \
 WEBLAND_HEADLESS="${WEBLAND_HEADLESS:-1}" \
   cargo run --manifest-path backend/Cargo.toml -p webland-server &
-(cd frontend && trunk serve) &
+(cd frontend && trunk serve --port "${WEBLAND_PORT:-3030}") &
 wait
