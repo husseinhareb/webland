@@ -24,19 +24,35 @@ use std::ffi::{CString, c_int};
 
 use ffmpeg_next::ffi::{
     AV_BUFFERSRC_FLAG_KEEP_REF, AV_CODEC_FLAG_LOW_DELAY, AV_HWFRAME_MAP_DIRECT,
-    AV_HWFRAME_MAP_READ, AVBufferRef, AVCodecContext, AVDRMFrameDescriptor, AVFilterContext,
-    AVFilterGraph, AVFrame, AVHWDeviceType, AVPacket, AVPictureType, AVPixelFormat, AVRational,
-    av_buffer_create, av_buffer_ref, av_buffer_unref, av_buffersink_get_frame,
-    av_buffersink_get_hw_frames_ctx, av_buffersrc_add_frame_flags, av_buffersrc_parameters_alloc,
-    av_buffersrc_parameters_set, av_frame_alloc, av_frame_free, av_frame_get_buffer,
-    av_frame_make_writable, av_frame_unref, av_free, av_hwdevice_ctx_create,
+    AV_HWFRAME_MAP_READ, AVBufferRef, AVCodecContext, AVDRMFrameDescriptor, AVERROR,
+    AVFilterContext, AVFilterGraph, AVFrame, AVHWDeviceType, AVPacket, AVPictureType,
+    AVPixelFormat, AVRational, EAGAIN, av_buffer_create, av_buffer_ref, av_buffer_unref,
+    av_buffersink_get_frame, av_buffersink_get_hw_frames_ctx, av_buffersrc_add_frame_flags,
+    av_buffersrc_parameters_alloc, av_buffersrc_parameters_set, av_frame_alloc, av_frame_free,
+    av_frame_get_buffer, av_frame_make_writable, av_frame_unref, av_free, av_hwdevice_ctx_create,
     av_hwdevice_ctx_create_derived, av_hwframe_ctx_alloc, av_hwframe_ctx_create_derived,
-    av_hwframe_ctx_init, av_hwframe_map, av_packet_alloc, av_packet_free, av_packet_unref,
-    avcodec_alloc_context3, avcodec_find_encoder_by_name, avcodec_free_context, avcodec_open2,
-    avcodec_receive_packet, avcodec_send_frame, avfilter_get_by_name, avfilter_graph_alloc,
-    avfilter_graph_alloc_filter, avfilter_graph_config, avfilter_graph_free, avfilter_init_str,
-    avfilter_link,
+    av_hwframe_ctx_init, av_hwframe_map, av_opt_set, av_packet_alloc, av_packet_free,
+    av_packet_unref, avcodec_alloc_context3, avcodec_find_encoder_by_name, avcodec_free_context,
+    avcodec_open2, avcodec_receive_packet, avcodec_send_frame, avfilter_get_by_name,
+    avfilter_graph_alloc, avfilter_graph_alloc_filter, avfilter_graph_config, avfilter_graph_free,
+    avfilter_init_str, avfilter_link,
 };
+
+/// What came back from a call to the encoder.
+#[derive(Debug)]
+pub enum Encoded {
+    /// An access unit, ready for the wire.
+    Packet(Vec<u8>),
+    /// The frame was accepted but the encoder has not emitted a packet yet.
+    ///
+    /// Not a failure: an encoder holds a frame or two before it produces output.
+    /// The distinction matters because the caller must not fall back to another
+    /// codec here — the frame is already in this stream, and sending it again by
+    /// another route would both duplicate it and leave a hole in the video.
+    Pending,
+    /// The frame could not be encoded at all; use something else.
+    Failed,
+}
 
 /// Where the encoder's frames come from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +92,9 @@ pub struct Encoder {
     packet: *mut AVPacket,
     width: u32,
     height: u32,
+    /// The surface's real width, which is the stride of the pixels handed to
+    /// [`Encoder::encode`] — not the same as the width actually encoded.
+    source_width: u32,
     pts: i64,
     input: Input,
     // Dmabuf input only: the DRM side of the import and the frames it maps through.
@@ -113,10 +132,14 @@ impl Encoder {
         format: u32,
         modifier: u64,
     ) -> Result<Self, Error> {
-        // Odd dimensions have no NV12 representation; the chroma plane is half
-        // size in both directions.
-        if width == 0 || height == 0 || width % 2 == 1 || height % 2 == 1 {
-            return Err(Error("surface size is not encodable as NV12"));
+        // NV12's chroma plane is half size in both directions, so the encoded
+        // picture must be even. A client picks its own size — a terminal rounds
+        // to whole character cells — so odd sizes are normal and refusing them
+        // would drop those surfaces to the pixel codecs. Encode the even part
+        // instead and leave at most a one pixel edge unrefreshed.
+        let (encoded_width, encoded_height) = (width & !1, height & !1);
+        if encoded_width == 0 || encoded_height == 0 {
+            return Err(Error("surface is too small to encode"));
         }
         let mut enc = Encoder {
             device: std::ptr::null_mut(),
@@ -127,8 +150,9 @@ impl Encoder {
             frame: std::ptr::null_mut(),
             hw_frame: std::ptr::null_mut(),
             packet: std::ptr::null_mut(),
-            width,
-            height,
+            width: encoded_width,
+            height: encoded_height,
+            source_width: width,
             pts: 0,
             input,
             drm_device: std::ptr::null_mut(),
@@ -272,6 +296,17 @@ impl Encoder {
                 return Err(Error("could not reference the frame pool"));
             }
         }
+        // Emit each frame as soon as it is encoded. The VA-API encoder defaults
+        // to holding frames back to keep the GPU busy, which is the right trade
+        // for a file and the wrong one for a desktop: an idle surface produces
+        // its next frame seconds later, so a held frame is a screen that never
+        // updates rather than a pipeline that stays full.
+        let depth = CString::new("async_depth").map_err(|_| Error("bad option name"))?;
+        let one = CString::new("1").map_err(|_| Error("bad option value"))?;
+        // SAFETY: the context is allocated and not yet open.
+        unsafe {
+            av_opt_set((*self.codec).priv_data, depth.as_ptr(), one.as_ptr(), 0);
+        }
         if unsafe { avcodec_open2(self.codec, codec, std::ptr::null_mut()) } < 0 {
             return Err(Error("h264_vaapi will not open"));
         }
@@ -398,9 +433,9 @@ impl Encoder {
         format: u32,
         modifier: u64,
         keyframe: bool,
-    ) -> Option<Vec<u8>> {
+    ) -> Encoded {
         if self.input != Input::Dmabuf || planes.is_empty() || planes.len() > 4 {
-            return None;
+            return Encoded::Failed;
         }
         // Rebuild the descriptor in place. Objects are distinct fds, not planes:
         // a compressed AMD buffer arrives as two planes — pixels and the DCC
@@ -410,7 +445,7 @@ impl Encoder {
         *descriptor = unsafe { std::mem::zeroed() };
         descriptor.nb_layers = 1;
         descriptor.layers[0].format = format;
-        descriptor.layers[0].nb_planes = i32::try_from(planes.len()).ok()?;
+        descriptor.layers[0].nb_planes = i32::try_from(planes.len()).ok().unwrap_or_default();
         let mut objects: Vec<i32> = Vec::with_capacity(planes.len());
         for (i, &(fd, offset, stride)) in planes.iter().enumerate() {
             let object = if let Some(existing) = objects.iter().position(|&seen| seen == fd) {
@@ -423,11 +458,13 @@ impl Encoder {
                 descriptor.objects[index].format_modifier = modifier;
                 index
             };
-            descriptor.layers[0].planes[i].object_index = i32::try_from(object).ok()?;
-            descriptor.layers[0].planes[i].offset = isize::try_from(offset).ok()?;
-            descriptor.layers[0].planes[i].pitch = isize::try_from(stride).ok()?;
+            descriptor.layers[0].planes[i].object_index =
+                i32::try_from(object).ok().unwrap_or_default();
+            descriptor.layers[0].planes[i].offset =
+                isize::try_from(offset).ok().unwrap_or_default();
+            descriptor.layers[0].planes[i].pitch = isize::try_from(stride).ok().unwrap_or_default();
         }
-        descriptor.nb_objects = i32::try_from(objects.len()).ok()?;
+        descriptor.nb_objects = i32::try_from(objects.len()).ok().unwrap_or_default();
 
         // SAFETY: the frames and pools live as long as `self`, and the
         // descriptor is owned by `self` so it outlives the frame pointing at it.
@@ -435,11 +472,11 @@ impl Encoder {
             av_frame_unref(self.drm_frame);
             let f = &mut *self.drm_frame;
             f.format = AVPixelFormat::AV_PIX_FMT_DRM_PRIME as c_int;
-            f.width = i32::try_from(self.width).ok()?;
-            f.height = i32::try_from(self.height).ok()?;
+            f.width = i32::try_from(self.width).ok().unwrap_or_default();
+            f.height = i32::try_from(self.height).ok().unwrap_or_default();
             f.hw_frames_ctx = av_buffer_ref(self.drm_frames);
             if f.hw_frames_ctx.is_null() {
-                return None;
+                return Encoded::Failed;
             }
             let bytes = std::ptr::from_mut(descriptor).cast::<u8>();
             f.data[0] = bytes;
@@ -453,22 +490,23 @@ impl Encoder {
                 0,
             );
             if f.buf[0].is_null() {
-                return None;
+                return Encoded::Failed;
             }
 
             av_frame_unref(self.mapped);
             (*self.mapped).format = AVPixelFormat::AV_PIX_FMT_VAAPI as c_int;
             (*self.mapped).hw_frames_ctx = av_buffer_ref(self.vaapi_frames);
             if (*self.mapped).hw_frames_ctx.is_null() {
-                return None;
+                return Encoded::Failed;
             }
-            if av_hwframe_map(
+            let mapped = av_hwframe_map(
                 self.mapped,
                 self.drm_frame,
                 (AV_HWFRAME_MAP_DIRECT as c_int) | (AV_HWFRAME_MAP_READ as c_int),
-            ) < 0
-            {
-                return None;
+            );
+            if mapped < 0 {
+                tracing::debug!(mapped, "dmabuf map failed");
+                return Encoded::Failed;
             }
             (*self.mapped).pts = self.pts;
             self.pts += 1;
@@ -543,10 +581,11 @@ impl Encoder {
     /// and on any encode error — a dropped frame is recoverable, and the next
     /// keyframe resynchronises the browser.
     #[must_use]
-    pub fn encode(&mut self, bgra: &[u8], keyframe: bool) -> Option<Vec<u8>> {
-        let stride = self.width as usize * 4;
+    pub fn encode(&mut self, bgra: &[u8], keyframe: bool) -> Encoded {
+        let stride = self.source_width as usize * 4;
+        let row = self.width as usize * 4;
         if bgra.len() < stride * self.height as usize {
-            return None;
+            return Encoded::Failed;
         }
         // SAFETY: the frame was allocated with these dimensions and BGRA format,
         // and we copy row by row using ffmpeg's own stride, never our own.
@@ -555,14 +594,18 @@ impl Encoder {
             // this may hand us fresh storage rather than let us scribble on a
             // buffer something downstream is reading.
             if av_frame_make_writable(self.frame) < 0 {
-                return None;
+                return Encoded::Failed;
             }
             let f = &mut *self.frame;
-            let dst_stride = usize::try_from(f.linesize[0]).ok()?;
-            for row in 0..self.height as usize {
-                let src = bgra.get(row * stride..(row + 1) * stride)?;
-                let dst = f.data[0].add(row * dst_stride);
-                std::ptr::copy_nonoverlapping(src.as_ptr(), dst, stride);
+            let Ok(dst_stride) = usize::try_from(f.linesize[0]) else {
+                return Encoded::Failed;
+            };
+            for line in 0..self.height as usize {
+                let Some(src) = bgra.get(line * stride..line * stride + row) else {
+                    return Encoded::Failed;
+                };
+                let dst = f.data[0].add(line * dst_stride);
+                std::ptr::copy_nonoverlapping(src.as_ptr(), dst, row);
             }
             f.pts = self.pts;
             self.pts += 1;
@@ -572,19 +615,22 @@ impl Encoder {
     }
 
     /// Push one frame through the graph and pull the encoded packet back out.
-    fn drain(&mut self, frame: *mut AVFrame, keyframe: bool) -> Option<Vec<u8>> {
+    fn drain(&mut self, frame: *mut AVFrame, keyframe: bool) -> Encoded {
         // SAFETY: all four pointers are live for the lifetime of `self`.
         unsafe {
             // KEEP_REF, or the call takes our buffer and leaves the frame
             // empty — the next frame would then copy into a null plane.
-            if av_buffersrc_add_frame_flags(self.src, frame, AV_BUFFERSRC_FLAG_KEEP_REF as c_int)
-                < 0
-            {
-                return None;
+            let pushed =
+                av_buffersrc_add_frame_flags(self.src, frame, AV_BUFFERSRC_FLAG_KEEP_REF as c_int);
+            if pushed < 0 {
+                tracing::debug!(pushed, "filter graph rejected the frame");
+                return Encoded::Failed;
             }
             av_frame_unref(self.hw_frame);
-            if av_buffersink_get_frame(self.sink, self.hw_frame) < 0 {
-                return None;
+            let pulled = av_buffersink_get_frame(self.sink, self.hw_frame);
+            if pulled < 0 {
+                tracing::debug!(pulled, "filter graph produced nothing");
+                return Encoded::Failed;
             }
             (*self.hw_frame).pict_type = if keyframe {
                 AVPictureType::AV_PICTURE_TYPE_I
@@ -592,17 +638,29 @@ impl Encoder {
                 AVPictureType::AV_PICTURE_TYPE_NONE
             };
             if avcodec_send_frame(self.codec, self.hw_frame) < 0 {
-                return None;
+                return Encoded::Failed;
             }
             av_packet_unref(self.packet);
-            if avcodec_receive_packet(self.codec, self.packet) < 0 {
-                return None;
+            let got = avcodec_receive_packet(self.codec, self.packet);
+            if got < 0 {
+                // EAGAIN is the encoder saying "accepted, but I need another
+                // frame first". Reporting that as failure made the caller send
+                // the same picture as deflate instead, so the codec flapped and
+                // the video stream lost frames it had already swallowed.
+                return if got == AVERROR(EAGAIN) {
+                    Encoded::Pending
+                } else {
+                    tracing::debug!(got, "encoder failed");
+                    Encoded::Failed
+                };
             }
             let p = &*self.packet;
-            let len = usize::try_from(p.size).ok()?;
+            let Ok(len) = usize::try_from(p.size) else {
+                return Encoded::Failed;
+            };
             let bytes = std::slice::from_raw_parts(p.data, len).to_vec();
             av_packet_unref(self.packet);
-            Some(bytes)
+            Encoded::Packet(bytes)
         }
     }
 }

@@ -23,6 +23,12 @@ use crate::compositor::{Renderer, SurfaceRenderer};
 use crate::decode::Decoder;
 use crate::latency::Latency;
 
+/// The browser's device pixel ratio, never zero.
+pub fn pixel_ratio() -> f64 {
+    let ratio = web_sys::window().map_or(1.0, |window| window.device_pixel_ratio());
+    if ratio > 0.0 { ratio } else { 1.0 }
+}
+
 /// Pixels each new surface is offset from the last, so three windows opening at
 /// the same size do not land exactly on top of each other.
 const CASCADE: i32 = 32;
@@ -107,9 +113,19 @@ impl Scene {
         canvas.set_height(height);
         let offset = self.opened * CASCADE;
         self.opened += 1;
+        // Display the bitmap at one canvas pixel per *device* pixel. Without
+        // dividing by the ratio the browser stretches every surface across
+        // `devicePixelRatio` screen pixels, which is what makes a crisp terminal
+        // look soft on any HiDPI display.
+        let ratio = pixel_ratio();
         let _ = canvas.set_attribute(
             "style",
-            &format!("position:absolute; left:{offset}px; top:{offset}px; z-index:1;"),
+            &format!(
+                "position:absolute; left:{offset}px; top:{offset}px; z-index:1; \
+                 width:{}px; height:{}px;",
+                f64::from(width) / ratio,
+                f64::from(height) / ratio,
+            ),
         );
         let _ = canvas.set_attribute("data-surface", &id.0.to_string());
         let _ = self.container.append_child(&canvas);

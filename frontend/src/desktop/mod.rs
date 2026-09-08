@@ -9,7 +9,11 @@ use std::rc::Rc;
 
 use leptos::html::Div;
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
+use wasm_bindgen::closure::Closure;
 use web_sys::Element;
+
+use webland_core::Size;
 
 use crate::latency::Latency;
 use crate::protocol::{
@@ -20,6 +24,24 @@ use crate::scene::Scene;
 /// Path the protocol socket is served on, proxied to the backend by whatever is
 /// serving the page (see `Trunk.toml`).
 const BACKEND_PATH: &str = "/ws";
+
+/// The browser window in device pixels, which is the resolution surfaces should
+/// be rendered at.
+///
+/// CSS pixels are not the display's pixels: on a HiDPI screen each one covers
+/// `devicePixelRatio` of them, so a surface rendered in CSS pixels is stretched
+/// to fit and looks soft. Multiplying here is what makes the desktop sharp.
+fn viewport() -> Option<Size> {
+    let window = web_sys::window()?;
+    let ratio = crate::scene::pixel_ratio();
+    let width = window.inner_width().ok()?.as_f64()? * ratio;
+    let height = window.inner_height().ok()?.as_f64()? * ratio;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Some(Size {
+        width: (width.max(1.0)) as u32,
+        height: (height.max(1.0)) as u32,
+    })
+}
 
 /// The protocol socket's URL, on the same origin as the page.
 ///
@@ -78,10 +100,36 @@ fn connect_and_render(status: RwSignal<String>, container: Element) {
     let opened = transport.clone();
     transport.on_open(Box::new(move || {
         status.set(String::from("connected — waiting for a surface…"));
+        // Tell the compositor how big the display actually is before asking for
+        // anything to put on it, so the first frame arrives at the right size
+        // rather than at a guess that then has to be redrawn.
+        if let Some(size) = viewport()
+            && let Ok(frame) = encode(&ClientMessage::Resize { size })
+        {
+            opened.send(&frame);
+        }
         if let Ok(frame) = encode(&ClientMessage::RequestKeyframe) {
             opened.send(&frame);
         }
     }));
+
+    // Follow the window: the browser is the display, so its size is the screen
+    // resolution and a resized window is a mode change.
+    {
+        let resizing = transport.clone();
+        let listener = Closure::<dyn FnMut()>::new(move || {
+            if let Some(size) = viewport()
+                && let Ok(frame) = encode(&ClientMessage::Resize { size })
+            {
+                resizing.send(&frame);
+            }
+        });
+        if let Some(window) = web_sys::window() {
+            let _ = window
+                .add_event_listener_with_callback("resize", listener.as_ref().unchecked_ref());
+        }
+        listener.forget();
+    }
     transport.on_close(Box::new(move || {
         status.set(String::from("disconnected — is the backend running?"));
     }));

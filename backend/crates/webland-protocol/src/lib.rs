@@ -151,6 +151,14 @@ pub enum ClientMessage {
     /// is the one part it must know, because there is a single seat and somebody
     /// has to receive the keystrokes.
     Focus { id: SurfaceId },
+    /// The size the browser wants surfaces configured at, in device pixels.
+    ///
+    /// Headless has no output, so without this the compositor invents a size
+    /// from an environment variable and every client renders at it regardless of
+    /// the window it is actually displayed in — too small, and then upscaled by
+    /// the browser, which is what makes it look soft. The browser is the display
+    /// here, so the browser is what knows the answer.
+    Resize { size: Size },
     /// Send full contents for every surface on the next frame.
     ///
     /// Frames carry only damaged regions, so a browser joining mid-stream has

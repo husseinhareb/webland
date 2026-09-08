@@ -5,7 +5,7 @@
 //! with ffmpeg is the other half of the check: a stream that only we can read is
 //! no use to a browser.
 
-use webland_compositor::encode::{Encoder, Input};
+use webland_compositor::encode::{Encoded, Encoder, Input};
 
 fn main() {
     let (w, h) = (1920u32, 1080u32);
@@ -37,7 +37,7 @@ fn main() {
                 frame[i + 3] = 0xFF;
             }
         }
-        if let Some(packet) = encoder.encode(&frame, n == 0) {
+        if let Encoded::Packet(packet) = encoder.encode(&frame, n == 0) {
             bytes += packet.len();
             stream.extend_from_slice(&packet);
         }

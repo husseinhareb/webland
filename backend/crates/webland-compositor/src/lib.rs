@@ -106,6 +106,8 @@ pub struct Webland {
     keyframe: bool,
     /// The surface the browser last raised, which is where input goes.
     focus: Option<SurfaceId>,
+    /// The size to configure toplevels at, as the browser last reported it.
+    size: (i32, i32),
 }
 
 impl BufferHandler for Webland {
@@ -135,9 +137,10 @@ impl XdgShellHandler for Webland {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        // Headless has no output, so clients have no size to render at and pick a
-        // small default. Tell them one, via WEBLAND_SIZE=WxH (default 1280x800).
-        let (width, height) = configured_size();
+        // Headless has no output, so clients have no size to render at and pick
+        // a small default. Tell them the browser's, which `ClientMessage::Resize`
+        // keeps current; `WEBLAND_SIZE` is only the value before one arrives.
+        let (width, height) = self.size;
         tracing::info!(width, height, "new xdg toplevel mapped");
         surface.with_pending_state(|state| {
             state.size = Some((width, height).into());
@@ -311,6 +314,16 @@ const INITIAL_FRAME_CREDIT: i32 = 2;
 /// sent, and no ack can arrive — a deadlock).
 const IDLE_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// The frame interval the pipe is sized against — 60Hz.
+const FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// The most frames allowed in flight, however long the round trip.
+///
+/// This is the latency bound from Decision 3 expressed as a number: at 60Hz it
+/// is a fifth of a second of queued frames, and a link slower than that should
+/// drop frames rather than build a queue nobody wants to watch.
+const MAX_FRAME_CREDIT: i32 = 12;
+
 /// Paces `wl_surface.frame` callbacks against the browser (Decision 3).
 ///
 /// Wayland clients redraw only when the compositor fires their frame callback.
@@ -320,26 +333,62 @@ const IDLE_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_milli
 /// from the browser saying it presented.
 struct FrameClock {
     credit: i32,
+    /// How many frames may be in flight at once. Adaptive: see [`FrameClock::on_ack`].
+    ceiling: i32,
     last_tick: std::time::Instant,
+    /// When each unacknowledged frame was sent, oldest first.
+    ///
+    /// Acks arrive in the order the frames were sent, so pairing them off gives
+    /// an exact round trip rather than an estimate.
+    sent: std::collections::VecDeque<std::time::Instant>,
+    /// Smoothed round trip to the browser and back.
+    round_trip: std::time::Duration,
 }
 
 impl FrameClock {
     fn new() -> Self {
         Self {
             credit: INITIAL_FRAME_CREDIT,
+            ceiling: INITIAL_FRAME_CREDIT,
             last_tick: std::time::Instant::now(),
+            sent: std::collections::VecDeque::new(),
+            round_trip: std::time::Duration::ZERO,
         }
+    }
+
+    /// A frame went out; remember when, so its ack can be timed.
+    fn on_send(&mut self, now: std::time::Instant) {
+        // Bounded: a browser that stops acking must not grow this without end.
+        if self.sent.len() >= MAX_FRAME_CREDIT as usize * 4 {
+            self.sent.pop_front();
+        }
+        self.sent.push_back(now);
     }
 
     /// The browser presented a frame, so one more redraw is warranted.
     ///
-    /// Capped: a burst of acks (or a browser reconnecting) must not bank enough
-    /// credit for clients to free-run afterwards.
-    // ponytail: one ack buys one callback tick across every surface, which is
-    // exact only while there is one surface. Per-surface credit lands with the
-    // multi-surface scene (Phase 4).
-    fn on_ack(&mut self) {
-        self.credit = (self.credit + 1).min(INITIAL_FRAME_CREDIT);
+    /// The ceiling on in-flight frames is the round trip divided by the frame
+    /// interval — the number of frames that fit in the pipe before the first ack
+    /// can possibly return. A fixed ceiling of two is right on loopback and
+    /// crippling anywhere else: over a tunnel with an 80ms round trip it caps
+    /// the desktop at 25 frames a second however fast the encoder runs, because
+    /// the clock cannot advance until an ack completes the trip.
+    fn on_ack(&mut self, now: std::time::Instant) {
+        if let Some(sent) = self.sent.pop_front() {
+            let sample = now.saturating_duration_since(sent);
+            // Smoothed, so one slow frame does not move the ceiling far.
+            self.round_trip = if self.round_trip.is_zero() {
+                sample
+            } else {
+                (self.round_trip * 3 + sample) / 4
+            };
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let fits = (self.round_trip.as_micros() / FRAME_INTERVAL.as_micros()) as i32;
+            self.ceiling = fits
+                .saturating_add(INITIAL_FRAME_CREDIT)
+                .clamp(INITIAL_FRAME_CREDIT, MAX_FRAME_CREDIT);
+        }
+        self.credit = (self.credit + 1).min(self.ceiling);
     }
 
     /// Whether to fire frame callbacks this iteration.
@@ -596,18 +645,37 @@ fn drain_client(
         return;
     };
     let mut events = Vec::new();
+    let mut resize = None;
     while let Some(message) = poll() {
         match message {
             ClientMessage::Input(event) => events.push(event),
             ClientMessage::FramePresented { id } => {
                 if let Some(tracked) = known.values_mut().find(|tracked| tracked.id == id) {
-                    tracked.clock.on_ack();
+                    tracked.clock.on_ack(std::time::Instant::now());
                 }
             }
             ClientMessage::RequestKeyframe => state.keyframe = true,
             ClientMessage::Focus { id } => state.focus = Some(id),
+            ClientMessage::Resize { size } => resize = Some(size),
         }
     }
+    // Reconfigure every toplevel when the browser's window changes size. The
+    // client redraws at the new size and the next capture picks it up, which is
+    // what turns a browser resize into a sharp surface rather than a scaled one.
+    if let Some(size) = resize {
+        #[allow(clippy::cast_possible_wrap)]
+        let wanted = (size.width.max(1) as i32, size.height.max(1) as i32);
+        if state.size != wanted {
+            state.size = wanted;
+            for toplevel in state.xdg_shell_state.toplevel_surfaces() {
+                toplevel.with_pending_state(|pending| {
+                    pending.size = Some(wanted.into());
+                });
+                toplevel.send_configure();
+            }
+        }
+    }
+
     // Input goes to the surface the browser raised; before it has raised
     // anything, to whichever surface exists.
     let focused = state.focus.and_then(|id| {
@@ -760,20 +828,27 @@ fn stream_dirty(
             }
         }
         if let Some(encoder) = tracked.encoder.as_mut() {
-            let encoded = match &dmabuf {
-                Some(p) => encoder.encode_dmabuf(&p.layout, p.fourcc, p.modifier, announced),
-                None => pixels
-                    .as_ref()
-                    .and_then(|bgra| encoder.encode(bgra, announced)),
+            let encoded = match (&dmabuf, pixels.as_ref()) {
+                (Some(p), _) => encoder.encode_dmabuf(&p.layout, p.fourcc, p.modifier, announced),
+                (None, Some(bgra)) => encoder.encode(bgra, announced),
+                (None, None) => encode::Encoded::Failed,
             };
-            if let Some(payload) = encoded {
-                emit(ServerMessage::SurfaceFrame(SurfaceFrame {
-                    id: tracked.id,
-                    codec: Codec::H264,
-                    damage: Vec::new(),
-                    payload,
-                }));
-                continue;
+            match encoded {
+                encode::Encoded::Packet(payload) => {
+                    emit(ServerMessage::SurfaceFrame(SurfaceFrame {
+                        id: tracked.id,
+                        codec: Codec::H264,
+                        damage: Vec::new(),
+                        payload,
+                    }));
+                    tracked.clock.on_send(std::time::Instant::now());
+                    continue;
+                }
+                // The encoder has the frame and will emit it with the next one.
+                // Sending the same picture by another codec would duplicate it
+                // and leave the video stream missing what it already consumed.
+                encode::Encoded::Pending => continue,
+                encode::Encoded::Failed => {}
             }
         }
 
@@ -812,6 +887,7 @@ fn stream_dirty(
             damage: vec![region],
             payload: webland_protocol::deflate(&payload),
         }));
+        tracked.clock.on_send(std::time::Instant::now());
     }
 
     // Tell the browser about anything that has gone. A closed window would
@@ -906,6 +982,7 @@ pub fn run_winit(
         seat,
         keyframe: false,
         focus: None,
+        size: configured_size(),
     };
 
     let keyboard = state
@@ -1092,6 +1169,7 @@ pub fn run_headless(
         seat,
         keyframe: false,
         focus: None,
+        size: configured_size(),
     };
 
     let keyboard = state
@@ -1166,8 +1244,11 @@ delegate_data_device!(Webland);
 
 #[cfg(test)]
 mod tests {
-    use super::{FrameClock, IDLE_FRAME_INTERVAL, INITIAL_FRAME_CREDIT, changed_region, crop};
-    use std::time::Instant;
+    use super::{
+        FrameClock, IDLE_FRAME_INTERVAL, INITIAL_FRAME_CREDIT, MAX_FRAME_CREDIT, changed_region,
+        crop,
+    };
+    use std::time::{Duration, Instant};
     use webland_core::{Rect, Size};
 
     fn rect(x: i32, y: i32, width: u32, height: u32) -> Rect {
@@ -1228,7 +1309,7 @@ mod tests {
         // client cannot run ahead into frames that will be discarded.
         assert!(!clock.should_tick(now));
 
-        clock.on_ack();
+        clock.on_ack(now);
         assert!(clock.should_tick(now));
         assert!(!clock.should_tick(now));
     }
@@ -1253,13 +1334,36 @@ mod tests {
         let now = Instant::now();
         let mut clock = FrameClock::new();
         // A burst of acks (or a browser reconnecting) must not let clients
-        // free-run afterwards.
+        // free-run afterwards. Nothing was sent, so no round trip is measured
+        // and the ceiling stays where it started.
         for _ in 0..50 {
-            clock.on_ack();
+            clock.on_ack(now);
         }
         for _ in 0..INITIAL_FRAME_CREDIT {
             assert!(clock.should_tick(now));
         }
         assert!(!clock.should_tick(now));
+    }
+
+    #[test]
+    fn frame_clock_opens_up_over_a_slow_link() {
+        let now = Instant::now();
+        let mut clock = FrameClock::new();
+        // A 96ms round trip fits six 16ms frames in the pipe, so holding the
+        // client to two would cap it at a fraction of the rate it could run.
+        let trip = Duration::from_millis(96);
+        for _ in 0..12 {
+            clock.on_send(now);
+            clock.on_ack(now + trip);
+        }
+        let mut ticks = 0;
+        while clock.should_tick(now) {
+            ticks += 1;
+        }
+        assert!(
+            ticks > INITIAL_FRAME_CREDIT,
+            "a slow link should allow more frames in flight, got {ticks}"
+        );
+        assert!(ticks <= MAX_FRAME_CREDIT, "but never more than the bound");
     }
 }
