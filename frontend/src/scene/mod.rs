@@ -17,7 +17,7 @@ use std::rc::Rc;
 use leptos::prelude::*;
 use web_sys::HtmlCanvasElement;
 use webland_core::SurfaceId;
-use webland_protocol::{Codec, ServerMessage, SurfaceFrame};
+use webland_protocol::{Application, Codec, ServerMessage, SurfaceFrame};
 
 use crate::compositor::{Renderer, SurfaceRenderer};
 use crate::decode::Decoder;
@@ -59,6 +59,8 @@ struct View {
 pub struct Scene {
     /// Drives the rendered window list.
     pub windows: RwSignal<Vec<WindowState>>,
+    /// What the launcher may start, as the compositor reported it.
+    pub applications: RwSignal<Vec<Application>>,
     views: Rc<RefCell<HashMap<u64, View>>>,
     /// The latest frame for a surface whose canvas Leptos has not mounted yet.
     ///
@@ -77,6 +79,7 @@ impl Scene {
     pub fn new(latency: Rc<Latency>) -> Self {
         Self {
             windows: RwSignal::new(Vec::new()),
+            applications: RwSignal::new(Vec::new()),
             views: Rc::new(RefCell::new(HashMap::new())),
             pending: Rc::new(RefCell::new(HashMap::new())),
             latency,
@@ -126,6 +129,7 @@ impl Scene {
                 });
                 self.raise(created.id);
             }
+            ServerMessage::Applications(applications) => self.applications.set(applications),
             ServerMessage::SurfaceTitle { id, title } => {
                 self.windows.update(|ws| {
                     if let Some(window) = ws.iter_mut().find(|w| w.id == id.0) {

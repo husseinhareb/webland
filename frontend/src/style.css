@@ -90,6 +90,73 @@ body {
   border-top: 1px solid #262630;
 }
 
+#webland-panel .launch {
+  padding: 0.35rem 0.85rem;
+  border: 1px solid #2f2f3a;
+  border-radius: 0.375rem;
+  background: #23232d;
+  color: #e6e6ea;
+  font: 600 0.8rem/1 system-ui, sans-serif;
+  cursor: pointer;
+}
+
+#webland-panel .launch:hover {
+  background: #2d2d39;
+}
+
+#webland-panel .menu {
+  position: absolute;
+  left: 0.75rem;
+  bottom: 46px;
+  width: 18rem;
+  max-height: 60vh;
+  display: none;
+  flex-direction: column;
+  border: 1px solid #2a2a33;
+  border-radius: 0.5rem;
+  background: #16161c;
+  box-shadow: 0 1rem 2.5rem rgb(0 0 0 / 60%);
+  overflow: hidden;
+}
+
+#webland-panel .menu.open {
+  display: flex;
+}
+
+#webland-panel .search {
+  border: 0;
+  border-bottom: 1px solid #262630;
+  padding: 0.6rem 0.75rem;
+  background: #1b1b23;
+  color: #e6e6ea;
+  font: 400 0.85rem/1 system-ui, sans-serif;
+}
+
+#webland-panel .search:focus {
+  outline: none;
+}
+
+#webland-panel .results {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+#webland-panel .app {
+  border: 0;
+  background: transparent;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  color: #c8c8d0;
+  font: 400 0.85rem/1.2 system-ui, sans-serif;
+  cursor: pointer;
+}
+
+#webland-panel .app:hover {
+  background: #23232d;
+  color: #fff;
+}
+
 #webland-panel .tasks {
   flex: 1;
   display: flex;

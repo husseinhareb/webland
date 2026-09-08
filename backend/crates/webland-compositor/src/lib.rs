@@ -38,6 +38,7 @@ use webland_protocol::{
 
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::gbm::GbmDevice;
+pub mod apps;
 pub mod encode;
 
 use smithay::backend::allocator::{Buffer, Fourcc, Modifier};
@@ -108,6 +109,8 @@ pub struct Webland {
     focus: Option<SurfaceId>,
     /// The size to configure toplevels at, as the browser last reported it.
     size: (i32, i32),
+    /// Send the launcher's list on the next pass.
+    announce_applications: bool,
 }
 
 impl BufferHandler for Webland {
@@ -685,20 +688,36 @@ fn send_frames_surface_tree(surface: &wl_surface::WlSurface, time: u32) {
 
 /// Drain browser messages: inject input into the seat, and credit the frame
 /// clock for every frame the browser reports presented.
+/// What `drain_client` needs that does not change from one pass to the next.
+struct Session<'a> {
+    keyboard: &'a KeyboardHandle<Webland>,
+    pointer: &'a PointerHandle<Webland>,
+    start_time: std::time::Instant,
+    applications: &'a apps::Applications,
+    display: &'a std::ffi::OsStr,
+}
+
 fn drain_client(
     state: &mut Webland,
     poll_client: &mut Option<Box<dyn FnMut() -> Option<ClientMessage>>>,
     known: &mut HashMap<ObjectId, Tracked>,
-    keyboard: &KeyboardHandle<Webland>,
-    pointer: &PointerHandle<Webland>,
-    start_time: std::time::Instant,
+    session: &Session<'_>,
 ) {
+    let Session {
+        keyboard,
+        pointer,
+        start_time,
+        applications,
+        display,
+    } = session;
+    let start_time = *start_time;
     let Some(poll) = poll_client.as_mut() else {
         return;
     };
     let mut events = Vec::new();
     let mut resize = None;
     let mut closing = Vec::new();
+    let mut launching = Vec::new();
     while let Some(message) = poll() {
         match message {
             ClientMessage::Input(event) => events.push(event),
@@ -707,12 +726,22 @@ fn drain_client(
                     tracked.clock.on_ack(std::time::Instant::now());
                 }
             }
-            ClientMessage::RequestKeyframe => state.keyframe = true,
+            ClientMessage::RequestKeyframe => {
+                state.keyframe = true;
+                // "Send me everything" includes what the launcher can start: a
+                // browser that just connected has no list yet.
+                state.announce_applications = true;
+            }
             ClientMessage::Focus { id } => state.focus = Some(id),
             ClientMessage::Resize { size } => resize = Some(size),
             ClientMessage::CloseSurface { id } => closing.push(id),
+            ClientMessage::Launch { id } => launching.push(id),
         }
     }
+    for id in launching {
+        applications.launch(id, display);
+    }
+
     for id in closing {
         let object = known
             .iter()
@@ -801,6 +830,7 @@ struct Tracked {
 /// rectangle to land on, so it asks for a keyframe and gets whole surfaces once.
 fn stream_dirty(
     state: &mut Webland,
+    applications: &apps::Applications,
     mut renderer: Option<&mut GlesRenderer>,
     on_frame: Option<&dyn Fn(ServerMessage)>,
     known: &mut HashMap<ObjectId, Tracked>,
@@ -810,6 +840,9 @@ fn stream_dirty(
         return;
     };
     let keyframe = std::mem::take(&mut state.keyframe);
+    if std::mem::take(&mut state.announce_applications) {
+        emit(ServerMessage::Applications(applications.listing()));
+    }
     let toplevels: Vec<WlSurface> = state
         .xdg_shell_state
         .toplevel_surfaces()
@@ -1081,6 +1114,7 @@ pub fn run_winit(
         keyframe: false,
         focus: None,
         size: configured_size(),
+        announce_applications: false,
     };
 
     let keyboard = state
@@ -1112,6 +1146,15 @@ pub fn run_winit(
     }
 
     let (mut backend, mut winit) = winit::init::<GlesRenderer>()?;
+    // Scanned once: .desktop files do not change while a session runs, and a
+    // launcher that re-reads a hundred files on every click would be paying for
+    // nothing.
+    let applications = apps::Applications::scan();
+    tracing::info!(
+        count = applications.listing().len(),
+        "applications available"
+    );
+
     let start_time = std::time::Instant::now();
     let mut clients = Vec::new();
 
@@ -1147,9 +1190,13 @@ pub fn run_winit(
             &mut state,
             &mut poll_client,
             &mut known,
-            &keyboard,
-            &pointer,
-            start_time,
+            &Session {
+                keyboard: &keyboard,
+                pointer: &pointer,
+                start_time,
+                applications: &applications,
+                display: &socket_name,
+            },
         );
 
         let size = backend.window_size();
@@ -1186,6 +1233,7 @@ pub fn run_winit(
 
         stream_dirty(
             &mut state,
+            &applications,
             None,
             on_frame.as_deref(),
             &mut known,
@@ -1268,6 +1316,7 @@ pub fn run_headless(
         keyframe: false,
         focus: None,
         size: configured_size(),
+        announce_applications: false,
     };
 
     let keyboard = state
@@ -1298,6 +1347,15 @@ pub fn run_headless(
         }
     }
 
+    // Scanned once: .desktop files do not change while a session runs, and a
+    // launcher that re-reads a hundred files on every click would be paying for
+    // nothing.
+    let applications = apps::Applications::scan();
+    tracing::info!(
+        count = applications.listing().len(),
+        "applications available"
+    );
+
     let start_time = std::time::Instant::now();
     let mut clients = Vec::new();
     let mut known: HashMap<ObjectId, Tracked> = HashMap::new();
@@ -1315,12 +1373,17 @@ pub fn run_headless(
             &mut state,
             &mut poll_client,
             &mut known,
-            &keyboard,
-            &pointer,
-            start_time,
+            &Session {
+                keyboard: &keyboard,
+                pointer: &pointer,
+                start_time,
+                applications: &applications,
+                display: &socket_name,
+            },
         );
         stream_dirty(
             &mut state,
+            &applications,
             renderer.as_mut(),
             on_frame.as_deref(),
             &mut known,

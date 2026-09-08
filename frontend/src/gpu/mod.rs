@@ -187,7 +187,9 @@ impl GpuRenderer {
             }
             ServerMessage::SurfaceFrame(frame) => self.draw(&frame),
             // The scene owns surface lifetime and chrome; a renderer only draws.
-            ServerMessage::SurfaceDestroyed { .. } | ServerMessage::SurfaceTitle { .. } => {}
+            ServerMessage::SurfaceDestroyed { .. }
+            | ServerMessage::SurfaceTitle { .. }
+            | ServerMessage::Applications(_) => {}
         }
     }
 

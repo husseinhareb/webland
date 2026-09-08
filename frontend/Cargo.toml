@@ -29,7 +29,7 @@ version = "0.3"
 features = [
     "Window", "Document", "Element", "EventTarget", "Location", "DomRect", "CssStyleDeclaration",
     "WebSocket", "BinaryType", "MessageEvent", "Event",
-    "HtmlCanvasElement", "CanvasRenderingContext2d", "ImageData",
+    "HtmlCanvasElement", "CanvasRenderingContext2d", "ImageData", "HtmlInputElement",
     "PointerEvent", "MouseEvent", "KeyboardEvent",
     "Performance",
     "VideoDecoder", "VideoDecoderConfig", "VideoDecoderInit", "VideoFrame",

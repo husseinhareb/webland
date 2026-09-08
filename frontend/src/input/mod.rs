@@ -75,6 +75,14 @@ pub fn wire(container: &Element, transport: Rc<WebSocketTransport>, latency: Rc<
             let held = held.clone();
             let latency = latency.clone();
             let listener = Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
+                // Keys aimed at the shell stay in the shell. The listener is on
+                // the window so that applications get keys without the canvas
+                // needing focus, which also means the launcher's search box
+                // would otherwise type into whichever client has the seat — and
+                // be counted as interaction latency while doing it.
+                if aimed_at_shell(&event) {
+                    return;
+                }
                 let Some(keycode) = evdev_key(&event.code()) else {
                     return;
                 };
@@ -277,6 +285,20 @@ fn evdev_key(code: &str) -> Option<u32> {
         _ => return None,
     };
     Some(key)
+}
+
+/// Is this key event meant for the shell rather than an application?
+///
+/// Anything typed into a form control belongs to the chrome around the surfaces,
+/// not to the surfaces themselves.
+fn aimed_at_shell(event: &KeyboardEvent) -> bool {
+    let Some(target) = event.target().and_then(|t| t.dyn_into::<Element>().ok()) else {
+        return false;
+    };
+    matches!(
+        target.tag_name().to_ascii_uppercase().as_str(),
+        "INPUT" | "TEXTAREA" | "SELECT" | "BUTTON"
+    )
 }
 
 /// The canvas an event landed on, if it landed on one at all.

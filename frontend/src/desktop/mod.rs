@@ -125,6 +125,9 @@ fn Panel(
     transport: StoredValue<Option<Rc<WebSocketTransport>>, LocalStorage>,
 ) -> impl IntoView {
     let windows = scene.with_value(|scene| scene.windows);
+    let applications = scene.with_value(|scene| scene.applications);
+    let open = RwSignal::new(false);
+    let filter = RwSignal::new(String::new());
     let clock = RwSignal::new(now());
     // A minute is the resolution shown, so that is the resolution ticked.
     {
@@ -147,8 +150,51 @@ fn Panel(
         }
     };
 
+    let launch = move |id: u32| {
+        open.set(false);
+        filter.set(String::new());
+        if let Some(transport) = transport.get_value()
+            && let Ok(frame) = encode(&ClientMessage::Launch { id })
+        {
+            transport.send(&frame);
+        }
+    };
+
+    // Filtered by a plain substring match. A launcher people type two letters
+    // into does not need fuzzy ranking to be useful, and the list is short.
+    let matching = move || {
+        let needle = filter.get().to_lowercase();
+        applications
+            .get()
+            .into_iter()
+            .filter(|app| needle.is_empty() || app.name.to_lowercase().contains(&needle))
+            .take(40)
+            .collect::<Vec<_>>()
+    };
+
     view! {
         <footer id="webland-panel">
+            <button
+                class="launch"
+                on:pointerdown=move |_| open.update(|open| *open = !*open)
+            >
+                "Apps"
+            </button>
+            <div class="menu" class:open=move || open.get()>
+                <input
+                    class="search"
+                    placeholder="Search…"
+                    prop:value=move || filter.get()
+                    on:input=move |event| filter.set(event_value(&event))
+                />
+                <div class="results">
+                    <For each=matching key=|app| app.id let:app>
+                        <button class="app" on:pointerdown=move |_| launch(app.id)>
+                            {app.name.clone()}
+                        </button>
+                    </For>
+                </div>
+            </div>
             <div class="tasks">
                 <For
                     each=move || windows.get()
@@ -163,6 +209,15 @@ fn Panel(
             <span class="clock">{move || clock.get()}</span>
         </footer>
     }
+}
+
+/// The current text of an `<input>` an event came from.
+fn event_value(event: &web_sys::Event) -> String {
+    event
+        .target()
+        .and_then(|target| target.dyn_into::<web_sys::HtmlInputElement>().ok())
+        .map(|input| input.value())
+        .unwrap_or_default()
 }
 
 /// Wall clock as `HH:MM`, for the panel.

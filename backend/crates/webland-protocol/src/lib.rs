@@ -76,6 +76,17 @@ pub enum Codec {
     H264,
 }
 
+/// An application the compositor is willing to start.
+///
+/// The browser picks one by `id` and never sends a command line. That is the
+/// whole point of naming them: the compositor runs only what it found itself, so
+/// a launcher cannot become a way to run arbitrary programs on the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Application {
+    pub id: u32,
+    pub name: String,
+}
+
 /// A surface appeared; the browser should allocate a scene node for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SurfaceCreated {
@@ -121,6 +132,8 @@ pub enum InputEvent {
 pub enum ServerMessage {
     SurfaceCreated(SurfaceCreated),
     SurfaceFrame(SurfaceFrame),
+    /// What the launcher may start, sent when a browser connects.
+    Applications(Vec<Application>),
     /// The surface's title changed, or was seen for the first time.
     ///
     /// Separate from `SurfaceCreated` because a client sets its title whenever
@@ -160,6 +173,8 @@ pub enum ClientMessage {
     /// is the one part it must know, because there is a single seat and somebody
     /// has to receive the keystrokes.
     Focus { id: SurfaceId },
+    /// Start the application with this id, as the launcher does.
+    Launch { id: u32 },
     /// Ask the surface's client to close, as a window button does.
     ///
     /// A request, not an order: the client may put up a save dialog, or ignore
