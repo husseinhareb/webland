@@ -5,46 +5,29 @@
 //! them into the Wayland seat. Keyboard mapping is `KeyboardEvent.code` →
 //! Linux evdev keycode; it covers a common subset, not (yet) IME or every key.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use web_sys::{Element, HtmlCanvasElement, KeyboardEvent, PointerEvent};
-use webland_core::{Point, SurfaceId};
+use webland_core::Point;
 use webland_protocol::{ClientMessage, InputEvent, Press, encode};
 
 use crate::latency::Latency;
 use crate::protocol::{Transport, WebSocketTransport};
-use crate::scene::Scene;
 
 /// Attach pointer (canvas) and keyboard (window) listeners that stream input.
-pub fn wire(
-    container: &Element,
-    transport: Rc<WebSocketTransport>,
-    latency: Rc<Latency>,
-    scene: Rc<RefCell<Scene>>,
-) {
-    // Events are bound on the container and routed by their target, so surfaces
-    // that appear later need no wiring of their own.
-    let dragging: Rc<Cell<Option<(f64, f64)>>> = Rc::new(Cell::new(None));
-    // The surface the compositor was last told to focus.
-    let focused: Rc<Cell<Option<SurfaceId>>> = Rc::new(Cell::new(None));
+pub fn wire(container: &Element, transport: Rc<WebSocketTransport>, latency: Rc<Latency>) {
+    // Bound on the desktop and routed by event target, so windows that open
+    // later need no wiring of their own.
     // Pointer motion.
     {
         let transport = transport.clone();
-        let dragging = dragging.clone();
         let listener = Closure::<dyn FnMut(PointerEvent)>::new(move |event: PointerEvent| {
             let Some(canvas) = target_canvas(&event) else {
                 return;
             };
-            // Alt-drag moves the surface. This never reaches the compositor: the
-            // whole point of Phase 4 is that moving a window is browser-side
-            // state costing no round trip and no re-encode.
-            if let Some((dx, dy)) = dragging.get() {
-                move_to(&canvas, event.client_x(), event.client_y(), dx, dy);
-                return;
-            }
             if let Some(position) = surface_position(&canvas, &event) {
                 send(&transport, InputEvent::PointerMotion { position });
             }
@@ -58,39 +41,10 @@ pub fn wire(
     for (name, press) in [("pointerdown", Press::Down), ("pointerup", Press::Up)] {
         let transport = transport.clone();
         let latency = latency.clone();
-        let scene = scene.clone();
-        let dragging = dragging.clone();
-        let focused = focused.clone();
         let listener = Closure::<dyn FnMut(PointerEvent)>::new(move |event: PointerEvent| {
-            let Some(canvas) = target_canvas(&event) else {
-                return;
-            };
-            if press == Press::Down {
-                let id = surface_id(&canvas);
-                // Raising is browser state and costs the compositor nothing.
-                if let Some(id) = id {
-                    scene.borrow().raise(id);
-                }
-                // Alt-drag is window management: it moves and restacks without
-                // the compositor hearing about it at all, which is the property
-                // Phase 4 is actually testing. A plain click is different — it
-                // hands over the seat, so the focus does go across.
-                if event.alt_key() {
-                    dragging.set(grab_offset(&canvas, &event));
-                    return;
-                }
-                // Raising is browser state; focus is the one thing the
-                // compositor needs, and only when it changes.
-                if let Some(id) = id
-                    && focused.replace(Some(id)) != Some(id)
-                    && let Ok(frame) = encode(&ClientMessage::Focus { id })
-                {
-                    transport.send(&frame);
-                }
-            } else if dragging.take().is_some() {
-                // The press that started this drag never went to the client, so
-                // neither can the release: a button up with no button down is a
-                // stuck-button bug waiting to happen.
+            // Only clicks that land on a surface are input; the chrome around it
+            // belongs to the shell, and raising and focusing happen there.
+            if target_canvas(&event).is_none() {
                 return;
             }
             if let Some(button) = evdev_button(event.button()) {
@@ -328,31 +282,4 @@ fn evdev_key(code: &str) -> Option<u32> {
 /// The canvas an event landed on, if it landed on one at all.
 fn target_canvas(event: &PointerEvent) -> Option<HtmlCanvasElement> {
     event.target()?.dyn_into::<HtmlCanvasElement>().ok()
-}
-
-/// The surface id a canvas was created for.
-fn surface_id(canvas: &HtmlCanvasElement) -> Option<SurfaceId> {
-    canvas
-        .get_attribute("data-surface")?
-        .parse()
-        .ok()
-        .map(SurfaceId)
-}
-
-/// Where in the canvas the drag started, so the window does not jump to put its
-/// corner under the cursor.
-fn grab_offset(canvas: &HtmlCanvasElement, event: &PointerEvent) -> Option<(f64, f64)> {
-    let rect = web_sys::Element::get_bounding_client_rect(canvas);
-    Some((
-        event.client_x() - rect.left(),
-        event.client_y() - rect.top(),
-    ))
-}
-
-/// Move a surface's canvas under the cursor. CSS only; the compositor is never
-/// told, and nothing is re-encoded.
-fn move_to(canvas: &HtmlCanvasElement, x: f64, y: f64, dx: f64, dy: f64) {
-    let style = canvas.style();
-    let _ = style.set_property("left", &format!("{}px", x - dx));
-    let _ = style.set_property("top", &format!("{}px", y - dy));
 }

@@ -506,6 +506,16 @@ struct Planes {
     layout: Vec<(i32, u32, u32)>,
 }
 
+/// A toplevel's current title, as the client last set it.
+fn toplevel_title(surface: &WlSurface) -> Option<String> {
+    smithay::wayland::compositor::with_states(surface, |states| {
+        states
+            .data_map
+            .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+            .and_then(|data| data.lock().ok()?.title.clone())
+    })
+}
+
 /// Describe a surface's committed dmabuf, if it committed one.
 fn dmabuf_planes(surface: &WlSurface) -> Option<Planes> {
     let buffer = with_renderer_surface_state(surface, |s| s.buffer().cloned())??;
@@ -646,6 +656,7 @@ fn drain_client(
     };
     let mut events = Vec::new();
     let mut resize = None;
+    let mut closing = Vec::new();
     while let Some(message) = poll() {
         match message {
             ClientMessage::Input(event) => events.push(event),
@@ -657,8 +668,24 @@ fn drain_client(
             ClientMessage::RequestKeyframe => state.keyframe = true,
             ClientMessage::Focus { id } => state.focus = Some(id),
             ClientMessage::Resize { size } => resize = Some(size),
+            ClientMessage::CloseSurface { id } => closing.push(id),
         }
     }
+    for id in closing {
+        let object = known
+            .iter()
+            .find(|(_, tracked)| tracked.id == id)
+            .map(|(object, _)| object.clone());
+        if let Some(toplevel) = state
+            .xdg_shell_state
+            .toplevel_surfaces()
+            .iter()
+            .find(|toplevel| Some(toplevel.wl_surface().id()) == object)
+        {
+            toplevel.send_close();
+        }
+    }
+
     // Reconfigure every toplevel when the browser's window changes size. The
     // client redraws at the new size and the next capture picks it up, which is
     // what turns a browser resize into a sharp surface rather than a scaled one.
@@ -721,6 +748,8 @@ struct Tracked {
     /// This surface's own pacing. One clock for the whole desktop would let a
     /// busy window spend the frame callbacks owed to the quiet ones.
     clock: FrameClock,
+    /// The title the browser has been told, so an unchanged one costs nothing.
+    title: Option<String>,
 }
 
 /// Capture changed surfaces and emit their frames to the browser transport.
@@ -756,6 +785,7 @@ fn stream_dirty(
                 pixels: Vec::new(),
                 encoder: None,
                 clock: FrameClock::new(),
+                title: None,
             }
         });
         let Some(commit) = with_renderer_surface_state(surface, |s| s.current_commit()) else {
@@ -781,16 +811,42 @@ fn stream_dirty(
         tracked.commit = Some(commit);
 
         // A resize invalidates whatever the browser is holding, and so does a
-        // browser that has just joined: both take the whole surface, and both
-        // invalidate the video stream the browser was decoding.
-        let announced = keyframe || tracked.size != Some(size);
+        // browser that has just joined: both take the whole surface.
+        let resized = tracked.size != Some(size);
+        let announced = keyframe || resized;
         if announced {
             tracked.size = Some(size);
-            tracked.encoder = None;
             emit(ServerMessage::SurfaceCreated(SurfaceCreated {
                 id: tracked.id,
                 size,
             }));
+        }
+        // Only a resize needs a new encoder — the filter graph and the codec
+        // both bake the dimensions in. A keyframe request does not: `announced`
+        // is passed to the encoder below and forces an IDR on the stream it
+        // already has. Rebuilding one per request meant a fresh VA-API context
+        // on every page load, and once those ran out encoding stopped dead.
+        if resized {
+            tracked.encoder = None;
+        }
+
+        // After `SurfaceCreated`, never before: the browser hangs a title on a
+        // window it already knows about, and one for a surface it has not been
+        // told about yet is dropped. Cleared on announce for the same reason a
+        // keyframe resends pixels — a browser that just arrived has heard
+        // nothing, whatever the last one was told.
+        if announced {
+            tracked.title = None;
+        }
+        let title = toplevel_title(surface);
+        if title.is_some() && tracked.title != title {
+            tracked.title.clone_from(&title);
+            if let Some(title) = title {
+                emit(ServerMessage::SurfaceTitle {
+                    id: tracked.id,
+                    title,
+                });
+            }
         }
 
         // H.264 first: it is the only codec that gets a scrolling terminal into

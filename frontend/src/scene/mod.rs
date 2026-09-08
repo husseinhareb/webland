@@ -1,144 +1,198 @@
-//! The browser-side scene: one view per Wayland surface.
+//! The browser-side scene: one window per Wayland surface.
 //!
-//! Phase 4's test is whether Phase 2 was per-surface for real, so each surface
-//! gets its own `<canvas>`, its own renderer and its own decoder. Nothing here
-//! is shared between surfaces except the page they sit on, which means position
-//! and stacking are CSS and moving a window costs the server nothing — no round
-//! trip, no re-encode, which is exactly what the phase asks for.
+//! Phase 4 proved the streaming is per-surface; this is where that becomes a
+//! desktop. Each surface has its own canvas, renderer and decoder — a separate
+//! decoder is not a nicety, since each surface is an independent H.264 stream
+//! with its own keyframes, and feeding two of them to one decoder produces
+//! garbage from the first frame.
 //!
-//! A separate decoder per surface is not a nicety: each surface is an
-//! independent H.264 stream with its own keyframes and reference frames, and
-//! feeding two of them to one decoder produces garbage from the first frame.
+//! Position, size and stacking live in [`WindowState`], which is a Leptos
+//! signal: moving or raising a window rerenders a style attribute and tells the
+//! compositor nothing at all.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use wasm_bindgen::JsCast;
-use web_sys::{Element, HtmlCanvasElement};
+use leptos::prelude::*;
+use web_sys::HtmlCanvasElement;
 use webland_core::SurfaceId;
-use webland_protocol::{Codec, ServerMessage};
+use webland_protocol::{Codec, ServerMessage, SurfaceFrame};
 
 use crate::compositor::{Renderer, SurfaceRenderer};
 use crate::decode::Decoder;
 use crate::latency::Latency;
 
 /// The browser's device pixel ratio, never zero.
+#[must_use]
 pub fn pixel_ratio() -> f64 {
     let ratio = web_sys::window().map_or(1.0, |window| window.device_pixel_ratio());
     if ratio > 0.0 { ratio } else { 1.0 }
 }
 
-/// Pixels each new surface is offset from the last, so three windows opening at
-/// the same size do not land exactly on top of each other.
-const CASCADE: i32 = 32;
+/// Pixels each new window is offset from the last, so windows opening at the
+/// same size do not land exactly on top of each other.
+const CASCADE: i32 = 34;
 
+/// Everything about a window that the shell draws, and nothing the compositor
+/// needs to know.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowState {
+    pub id: u64,
+    pub width: u32,
+    pub height: u32,
+    pub title: String,
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+}
+
+/// What actually paints a surface, once its canvas exists in the DOM.
 struct View {
     canvas: HtmlCanvasElement,
     renderer: Rc<RefCell<Renderer>>,
     decoder: Option<Decoder>,
 }
 
-/// Every surface the browser currently knows about.
+/// The set of open windows.
+#[derive(Clone)]
 pub struct Scene {
-    container: Element,
-    views: HashMap<u64, View>,
+    /// Drives the rendered window list.
+    pub windows: RwSignal<Vec<WindowState>>,
+    views: Rc<RefCell<HashMap<u64, View>>>,
+    /// The latest frame for a surface whose canvas Leptos has not mounted yet.
+    ///
+    /// Leptos mounts on its own schedule, so a surface's first frame regularly
+    /// arrives before there is anywhere to put it. Asking for another keyframe
+    /// works only if the timing happens to suit; keeping the frame always does,
+    /// and one frame per surface is a bounded thing to hold.
+    pending: Rc<RefCell<HashMap<u64, SurfaceFrame>>>,
     latency: Rc<Latency>,
-    /// Bumped so a newly focused surface can be raised above the rest.
-    top: Rc<RefCell<i32>>,
-    opened: i32,
+    top: Rc<Cell<i32>>,
+    opened: Rc<Cell<i32>>,
 }
 
 impl Scene {
     #[must_use]
-    pub fn new(container: Element, latency: Rc<Latency>) -> Self {
+    pub fn new(latency: Rc<Latency>) -> Self {
         Self {
-            container,
-            views: HashMap::new(),
+            windows: RwSignal::new(Vec::new()),
+            views: Rc::new(RefCell::new(HashMap::new())),
+            pending: Rc::new(RefCell::new(HashMap::new())),
             latency,
-            top: Rc::new(RefCell::new(1)),
-            opened: 0,
+            top: Rc::new(Cell::new(1)),
+            opened: Rc::new(Cell::new(0)),
         }
     }
 
-    /// Apply a message from the compositor to the surface it names.
-    pub fn handle(&mut self, message: ServerMessage) {
+    /// Apply a message from the compositor to the window it names.
+    pub fn handle(&self, message: ServerMessage) {
         match message {
             ServerMessage::SurfaceCreated(created) => {
-                self.ensure(created.id, created.size.width, created.size.height);
-                if let Some(view) = self.views.get(&created.id.0) {
-                    view.renderer
-                        .borrow_mut()
-                        .handle(ServerMessage::SurfaceCreated(created));
+                let id = created.id.0;
+                let (width, height) = (created.size.width, created.size.height);
+                if self.windows.with(|ws| ws.iter().any(|w| w.id == id)) {
+                    // A resize, not a new window: the canvas follows the
+                    // surface, and this is the only moment its bitmap should be
+                    // reallocated — which also clears it, hence the keyframe
+                    // that always accompanies a resize.
+                    self.windows.update(|ws| {
+                        if let Some(window) = ws.iter_mut().find(|w| w.id == id) {
+                            window.width = width;
+                            window.height = height;
+                        }
+                    });
+                    if let Some(view) = self.views.borrow().get(&id)
+                        && (view.canvas.width() != width || view.canvas.height() != height)
+                    {
+                        view.canvas.set_width(width);
+                        view.canvas.set_height(height);
+                    }
+                    return;
                 }
+                let offset = self.opened.get() * CASCADE;
+                self.opened.set(self.opened.get() + 1);
+                self.top.set(self.top.get() + 1);
+                self.windows.update(|ws| {
+                    ws.push(WindowState {
+                        id,
+                        width,
+                        height,
+                        title: String::from("…"),
+                        x: 40 + offset,
+                        y: 40 + offset,
+                        z: 0,
+                    });
+                });
+                self.raise(created.id);
+            }
+            ServerMessage::SurfaceTitle { id, title } => {
+                self.windows.update(|ws| {
+                    if let Some(window) = ws.iter_mut().find(|w| w.id == id.0) {
+                        window.title = title;
+                    }
+                });
             }
             ServerMessage::SurfaceFrame(frame) => {
-                let Some(view) = self.views.get(&frame.id.0) else {
+                let views = self.views.borrow();
+                let Some(view) = views.get(&frame.id.0) else {
+                    self.pending.borrow_mut().insert(frame.id.0, frame);
                     return;
                 };
-                if frame.codec == Codec::H264 {
-                    if let Some(decoder) = view.decoder.as_ref() {
-                        decoder.decode(&frame.payload, view.canvas.width(), view.canvas.height());
-                    }
-                } else {
-                    view.renderer
-                        .borrow_mut()
-                        .handle(ServerMessage::SurfaceFrame(frame));
-                    self.latency.frame_drawn();
-                }
+                self.paint(view, frame);
             }
             ServerMessage::SurfaceDestroyed { id } => {
-                if let Some(view) = self.views.remove(&id.0) {
-                    view.canvas.remove();
-                }
+                self.views.borrow_mut().remove(&id.0);
+                self.windows.update(|ws| ws.retain(|w| w.id != id.0));
             }
         }
     }
 
-    /// Create the canvas and renderer for a surface we have not seen before.
-    fn ensure(&mut self, id: SurfaceId, width: u32, height: u32) {
-        if self.views.contains_key(&id.0) {
-            return;
+    /// Draw one frame into the view that owns it.
+    fn paint(&self, view: &View, frame: SurfaceFrame) {
+        if frame.codec == Codec::H264 {
+            if let Some(decoder) = view.decoder.as_ref() {
+                let (width, height) = self
+                    .windows
+                    .with_untracked(|ws| {
+                        ws.iter()
+                            .find(|w| w.id == frame.id.0)
+                            .map(|w| (w.width, w.height))
+                    })
+                    .unwrap_or((0, 0));
+                decoder.decode(&frame.payload, width, height);
+            }
+        } else {
+            view.renderer
+                .borrow_mut()
+                .handle(ServerMessage::SurfaceFrame(frame));
+            self.latency.frame_drawn();
         }
-        let Some(document) = web_sys::window().and_then(|w| w.document()) else {
-            return;
-        };
-        let Ok(element) = document.create_element("canvas") else {
-            return;
-        };
-        let Ok(canvas) = element.dyn_into::<HtmlCanvasElement>() else {
-            return;
-        };
-        canvas.set_width(width);
-        canvas.set_height(height);
-        let offset = self.opened * CASCADE;
-        self.opened += 1;
-        // Display the bitmap at one canvas pixel per *device* pixel. Without
-        // dividing by the ratio the browser stretches every surface across
-        // `devicePixelRatio` screen pixels, which is what makes a crisp terminal
-        // look soft on any HiDPI display.
-        let ratio = pixel_ratio();
-        let _ = canvas.set_attribute(
-            "style",
-            &format!(
-                "position:absolute; left:{offset}px; top:{offset}px; z-index:1; \
-                 width:{}px; height:{}px;",
-                f64::from(width) / ratio,
-                f64::from(height) / ratio,
-            ),
-        );
-        let _ = canvas.set_attribute("data-surface", &id.0.to_string());
-        let _ = self.container.append_child(&canvas);
+    }
 
-        // WebGPU per surface would want one device shared between them; this
-        // asks for a device each.
-        // ponytail: a handful of windows is a handful of devices, which the
-        // browser tolerates. Share one `wgpu::Device` across surfaces when the
-        // window count stops being a handful.
-        let renderer = match SurfaceRenderer::new(canvas.clone()) {
-            Ok(canvas2d) => Rc::new(RefCell::new(Renderer::Canvas(canvas2d))),
-            Err(_) => return,
+    /// Give a window's canvas a renderer, once Leptos has mounted it.
+    ///
+    /// Returns `true` the first time a surface is attached, which is the moment
+    /// to ask for a keyframe: frames that arrived before this had nowhere to go.
+    pub fn attach(&self, id: u64, canvas: &HtmlCanvasElement) -> bool {
+        if self.views.borrow().contains_key(&id) {
+            return false;
+        }
+        // Size the bitmap here rather than from the view. Assigning `width` or
+        // `height` clears a canvas even when the value does not change, and a
+        // reactive attribute would do exactly that on the next render — wiping
+        // the frame just drawn, with no new frame coming for an idle client.
+        if let Some((width, height)) = self
+            .windows
+            .with_untracked(|ws| ws.iter().find(|w| w.id == id).map(|w| (w.width, w.height)))
+        {
+            canvas.set_width(width);
+            canvas.set_height(height);
+        }
+        let Ok(canvas2d) = SurfaceRenderer::new(canvas.clone()) else {
+            return false;
         };
+        let renderer = Rc::new(RefCell::new(Renderer::Canvas(canvas2d)));
         let drawing = renderer.clone();
         let drawn = self.latency.clone();
         let decoder = Decoder::new(move |frame| {
@@ -146,40 +200,37 @@ impl Scene {
             drawn.frame_drawn();
         })
         .ok();
-
-        self.views.insert(
-            id.0,
-            View {
-                canvas,
-                renderer,
-                decoder,
-            },
-        );
-    }
-
-    /// Raise a surface above the others. Pure browser state — the compositor is
-    /// never told, which is the point of the phase.
-    pub fn raise(&self, id: SurfaceId) {
-        let Some(view) = self.views.get(&id.0) else {
-            return;
+        let view = View {
+            canvas: canvas.clone(),
+            renderer,
+            decoder,
         };
-        let mut top = self.top.borrow_mut();
-        *top += 1;
-        let style = view.canvas.get_attribute("style").unwrap_or_default();
-        let style = strip_z_index(&style);
-        let _ = view
-            .canvas
-            .set_attribute("style", &format!("{style} z-index:{top};"));
+        // Anything that arrived while this canvas was still being mounted.
+        if let Some(frame) = self.pending.borrow_mut().remove(&id) {
+            self.paint(&view, frame);
+        }
+        self.views.borrow_mut().insert(id, view);
+        true
     }
-}
 
-/// Drop any `z-index` from an inline style so a new one can replace it.
-fn strip_z_index(style: &str) -> String {
-    style
-        .split(';')
-        .map(str::trim)
-        .filter(|part| !part.is_empty() && !part.starts_with("z-index"))
-        .map(|part| format!("{part};"))
-        .collect::<Vec<_>>()
-        .join(" ")
+    /// Put a window above the others. Browser state; the compositor is not told.
+    pub fn raise(&self, id: SurfaceId) {
+        self.top.set(self.top.get() + 1);
+        let top = self.top.get();
+        self.windows.update(|ws| {
+            if let Some(window) = ws.iter_mut().find(|w| w.id == id.0) {
+                window.z = top;
+            }
+        });
+    }
+
+    /// Move a window to a new top-left corner.
+    pub fn move_to(&self, id: u64, x: i32, y: i32) {
+        self.windows.update(|ws| {
+            if let Some(window) = ws.iter_mut().find(|w| w.id == id) {
+                window.x = x;
+                window.y = y;
+            }
+        });
+    }
 }

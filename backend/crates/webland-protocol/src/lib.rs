@@ -121,6 +121,15 @@ pub enum InputEvent {
 pub enum ServerMessage {
     SurfaceCreated(SurfaceCreated),
     SurfaceFrame(SurfaceFrame),
+    /// The surface's title changed, or was seen for the first time.
+    ///
+    /// Separate from `SurfaceCreated` because a client sets its title whenever
+    /// it likes — a terminal rewrites it on every command — and the browser
+    /// wants the new one without a new surface.
+    SurfaceTitle {
+        id: SurfaceId,
+        title: String,
+    },
     /// The surface is gone; the browser should drop its scene node.
     ///
     /// Without this a closed window stays on screen forever: the browser has no
@@ -151,6 +160,11 @@ pub enum ClientMessage {
     /// is the one part it must know, because there is a single seat and somebody
     /// has to receive the keystrokes.
     Focus { id: SurfaceId },
+    /// Ask the surface's client to close, as a window button does.
+    ///
+    /// A request, not an order: the client may put up a save dialog, or ignore
+    /// it. The surface goes away when the client says so, via `SurfaceDestroyed`.
+    CloseSurface { id: SurfaceId },
     /// The size the browser wants surfaces configured at, in device pixels.
     ///
     /// Headless has no output, so without this the compositor invents a size

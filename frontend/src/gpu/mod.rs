@@ -186,8 +186,8 @@ impl GpuRenderer {
                 self.resize(created.size.width, created.size.height);
             }
             ServerMessage::SurfaceFrame(frame) => self.draw(&frame),
-            // The scene owns surface lifetime; a renderer only ever draws.
-            ServerMessage::SurfaceDestroyed { .. } => {}
+            // The scene owns surface lifetime and chrome; a renderer only draws.
+            ServerMessage::SurfaceDestroyed { .. } | ServerMessage::SurfaceTitle { .. } => {}
         }
     }
 

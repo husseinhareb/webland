@@ -9,16 +9,68 @@ body {
   color: #e6e6ea;
 }
 
-main {
-  display: grid;
-  place-items: center;
+#webland-desktop {
+  position: relative;
   min-height: 100vh;
+  overflow: hidden;
+  /* Windows are absolutely positioned against this, so their coordinates are
+     the page's and drag arithmetic needs no scroll correction. */
 }
 
-#webland-surface {
-  max-width: 100vw;
-  max-height: 100vh;
-  image-rendering: auto;
+.window {
+  position: absolute;
+  border-radius: 0.5rem;
+  overflow: hidden;
+  background: #16161c;
+  box-shadow: 0 0.75rem 2rem rgb(0 0 0 / 55%);
+  border: 1px solid #2a2a33;
+}
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  height: 28px;
+  padding: 0 0.25rem 0 0.75rem;
+  background: #1f1f27;
+  /* The bar is the drag handle, so never let a drag select its text. */
+  user-select: none;
+  cursor: grab;
+}
+
+.titlebar:active {
+  cursor: grabbing;
+}
+
+.title {
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font: 500 0.8rem/1 system-ui, sans-serif;
+  color: #c8c8d0;
+}
+
+.close {
+  border: 0;
+  border-radius: 0.25rem;
+  width: 22px;
+  height: 22px;
+  background: transparent;
+  color: #9a9aa6;
+  font: 600 1rem/1 system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.close:hover {
+  background: #a03040;
+  color: #fff;
+}
+
+.window canvas {
+  display: block;
+  /* The canvas is the surface at its own resolution; the window is sized to
+     match, so no scaling happens here. */
 }
 
 .status:empty {
