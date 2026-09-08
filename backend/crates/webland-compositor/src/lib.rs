@@ -56,7 +56,7 @@ use smithay::backend::renderer::utils::{
 use smithay::backend::renderer::{Color32F, Frame, Renderer};
 use smithay::backend::renderer::{ExportMem, ImportDma};
 use smithay::backend::winit::{self, WinitEvent};
-use smithay::input::keyboard::{FilterResult, KeyboardHandle};
+use smithay::input::keyboard::{FilterResult, KeyboardHandle, XkbConfig};
 use smithay::input::pointer::{ButtonEvent, MotionEvent, PointerHandle};
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
@@ -445,6 +445,48 @@ fn changed_region(old: &[u8], new: &[u8], size: Size) -> Option<Rect> {
 }
 
 /// The size to ask clients to render at, from `WEBLAND_SIZE=WxH` (default 1280x800).
+/// The keyboard layout to interpret keys with.
+///
+/// The browser reports `KeyboardEvent.code`, which is a physical key position
+/// and says nothing about what is printed on it: the key labelled A on an AZERTY
+/// keyboard reports `KeyQ`. Turning that into a letter is xkb's job, and it can
+/// only do it with the right layout — with the default it silently assumes US
+/// and every French keyboard types `q` for `a`.
+///
+/// Taken from the host, because the keyboard is a real one plugged into this
+/// machine even though the display is a browser. `WEBLAND_LAYOUT` and
+/// `WEBLAND_VARIANT` override it; empty means libxkbcommon's own default.
+fn xkb_config() -> XkbConfig<'static> {
+    fn leak(value: String) -> &'static str {
+        // Leaked deliberately: one small string for the process's lifetime,
+        // versus threading a lifetime through the seat for no benefit.
+        Box::leak(value.into_boxed_str())
+    }
+
+    let layout = std::env::var("WEBLAND_LAYOUT")
+        .ok()
+        .or_else(host_layout)
+        .unwrap_or_default();
+    let variant = std::env::var("WEBLAND_VARIANT").unwrap_or_default();
+    if !layout.is_empty() {
+        tracing::info!(%layout, %variant, "keyboard layout");
+    }
+    XkbConfig {
+        layout: leak(layout),
+        variant: leak(variant),
+        ..XkbConfig::default()
+    }
+}
+
+/// The host's configured X11/xkb layout, as systemd records it.
+fn host_layout() -> Option<String> {
+    let conf = std::fs::read_to_string("/etc/vconsole.conf").ok()?;
+    conf.lines()
+        .filter_map(|line| line.strip_prefix("XKBLAYOUT="))
+        .map(|value| value.trim().trim_matches('"').to_string())
+        .find(|value| !value.is_empty())
+}
+
 fn configured_size() -> (i32, i32) {
     std::env::var("WEBLAND_SIZE")
         .ok()
@@ -1048,7 +1090,7 @@ pub fn run_winit(
         // numbers are not ours to be approximate about: the placeholder 200/200
         // asked for 200 keys a second, and a key-up that took a few frames to
         // arrive spelled out thirty characters.
-        .add_keyboard(Default::default(), 600, 25)
+        .add_keyboard(xkb_config(), 600, 25)
         .unwrap();
     let pointer = state.seat.add_pointer();
 
@@ -1235,7 +1277,7 @@ pub fn run_headless(
         // numbers are not ours to be approximate about: the placeholder 200/200
         // asked for 200 keys a second, and a key-up that took a few frames to
         // arrive spelled out thirty characters.
-        .add_keyboard(Default::default(), 600, 25)
+        .add_keyboard(xkb_config(), 600, 25)
         .unwrap();
     let pointer = state.seat.add_pointer();
 
