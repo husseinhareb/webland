@@ -17,9 +17,26 @@ use crate::protocol::{
 };
 use crate::scene::Scene;
 
-/// Backend WebSocket endpoint. Run the backend with `WEBLAND_WS=127.0.0.1:9001`
-/// to match (localhost only until the protocol has authentication).
-const BACKEND: &str = "ws://127.0.0.1:9001";
+/// Path the protocol socket is served on, proxied to the backend by whatever is
+/// serving the page (see `Trunk.toml`).
+const BACKEND_PATH: &str = "/ws";
+
+/// The protocol socket's URL, on the same origin as the page.
+///
+/// Derived rather than hardcoded so the page works wherever it is served from:
+/// a hardcoded `127.0.0.1` is the viewer's own loopback once the browser is on
+/// another machine, and `wss` is required on an https page.
+fn backend() -> String {
+    let Some(location) = web_sys::window().map(|window| window.location()) else {
+        return format!("ws://127.0.0.1:9001{BACKEND_PATH}");
+    };
+    let secure = location.protocol().is_ok_and(|scheme| scheme == "https:");
+    let scheme = if secure { "wss" } else { "ws" };
+    let host = location
+        .host()
+        .unwrap_or_else(|_| String::from("127.0.0.1:3030"));
+    format!("{scheme}://{host}{BACKEND_PATH}")
+}
 
 #[component]
 pub fn Desktop() -> impl IntoView {
@@ -46,10 +63,11 @@ fn connect_and_render(status: RwSignal<String>, container: Element) {
     let latency = Rc::new(Latency::new());
     let scene = Rc::new(RefCell::new(Scene::new(container.clone(), latency.clone())));
 
-    let transport = match WebSocketTransport::connect(BACKEND) {
+    let backend = backend();
+    let transport = match WebSocketTransport::connect(&backend) {
         Ok(transport) => Rc::new(transport),
         Err(_) => {
-            status.set(format!("could not open {BACKEND}"));
+            status.set(format!("could not open {backend}"));
             return;
         }
     };
@@ -65,10 +83,7 @@ fn connect_and_render(status: RwSignal<String>, container: Element) {
         }
     }));
     transport.on_close(Box::new(move || {
-        status.set(format!(
-            "disconnected — is the backend running on {}?",
-            BACKEND.trim_start_matches("ws://")
-        ));
+        status.set(String::from("disconnected — is the backend running?"));
     }));
 
     // Cloned into the handler so we can ack each presented frame (Decision 3:

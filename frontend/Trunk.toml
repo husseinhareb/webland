@@ -6,3 +6,15 @@ target = "index.html"
 # Localhost only until the protocol has authentication (see docs/roadmap.md).
 addresses = ["127.0.0.1"]
 port = 3030
+
+# The protocol socket, served from the page's own origin at /ws.
+#
+# The frontend used to dial ws://127.0.0.1:9001 directly, which only ever worked
+# with the browser on this machine: from anywhere else 127.0.0.1 is the viewer's
+# own loopback, and on an https page a ws:// URL is blocked as mixed content
+# regardless. Same origin sidesteps both, and means a tunnel or reverse proxy
+# only has to forward one port.
+[[proxy]]
+backend = "ws://127.0.0.1:9001"
+ws = true
+rewrite = "/ws"
