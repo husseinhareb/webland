@@ -2,7 +2,8 @@
 //!
 //! Read from freedesktop `.desktop` files, which is where every installed
 //! application already describes itself — name, command, and whether it wants to
-//! be shown in a menu at all. Nothing here is configured by hand.
+//! be shown in a menu at all. Nothing here is configured by hand, except the one
+//! thing that cannot be read from anywhere: see [`parse_overrides`].
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -27,6 +28,10 @@ impl Applications {
             format!("{home}/.local/share/applications"),
             String::from("/usr/share/applications"),
         ];
+        let overrides = overrides(&home);
+        if !overrides.is_empty() {
+            tracing::info!(count = overrides.len(), "launch command overrides");
+        }
         for dir in dirs {
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
@@ -48,6 +53,7 @@ impl Applications {
         let mut commands = HashMap::with_capacity(found.len());
         for (index, (name, exec, icon)) in found.into_iter().enumerate() {
             let Ok(id) = u32::try_from(index) else { break };
+            let exec = overrides.get(&name.to_lowercase()).cloned().unwrap_or(exec);
             names.push(Application {
                 id,
                 name,
@@ -86,6 +92,68 @@ impl Applications {
             Err(err) => tracing::warn!(%command, %err, "could not launch"),
         }
     }
+}
+
+/// The user's launch overrides, read from `$XDG_CONFIG_HOME/webland/launch.conf`.
+fn overrides(home: &str) -> HashMap<String, String> {
+    let path = std::env::var("XDG_CONFIG_HOME").map_or_else(
+        |_| format!("{home}/.config/webland/launch.conf"),
+        |dir| format!("{dir}/webland/launch.conf"),
+    );
+    parse_overrides(&std::fs::read_to_string(path).unwrap_or_default(), home)
+}
+
+/// Parse `Name = command` lines, keyed by lower-cased name.
+///
+/// This exists for one thing a `.desktop` file cannot express: a single-instance
+/// application — Firefox, Chromium, anything Electron — hands its request to a
+/// copy already running as the same user and exits, so the launcher's window
+/// never appears at all. The second instance needs a profile of its own, and
+/// only the person running webland knows where that should live:
+///
+/// ```text
+/// Firefox  = firefox --no-remote --profile ~/.webland/firefox
+/// Chromium = chromium --user-data-dir=~/.webland/chromium
+/// ```
+///
+/// Create the profile directory first — Firefox will not make one whose parent
+/// is missing, and says so in a dialog rather than on stderr.
+///
+/// Blank lines and `#` comments are ignored. The first `=` separates, so a
+/// command may contain more of them.
+fn parse_overrides(text: &str, home: &str) -> HashMap<String, String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| line.split_once('='))
+        .map(|(name, command)| {
+            (
+                name.trim().to_lowercase(),
+                expand_home(command.trim(), home),
+            )
+        })
+        .filter(|(name, command)| !name.is_empty() && !command.is_empty())
+        .collect()
+}
+
+/// Expand a leading `~/`, whether it opens a word or follows a flag's `=`.
+///
+/// The command is spawned directly, so there is no shell to do this and a
+/// literal `~` would become a directory of that name.
+fn expand_home(command: &str, home: &str) -> String {
+    command
+        .split_whitespace()
+        .map(|word| {
+            if let Some((flag, rest)) = word.split_once("=~/") {
+                format!("{flag}={home}/{rest}")
+            } else if let Some(rest) = word.strip_prefix("~/") {
+                format!("{home}/{rest}")
+            } else {
+                word.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Pull the name and command out of one `.desktop` file.
@@ -241,7 +309,7 @@ fn strip_field_codes(exec: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{base64, icon_path, strip_field_codes};
+    use super::{base64, icon_path, parse_overrides, strip_field_codes};
 
     #[test]
     fn field_codes_are_dropped_but_arguments_are_not() {
@@ -260,6 +328,31 @@ mod tests {
         assert_eq!(base64(b"foobar"), "Zm9vYmFy");
         // All 64 symbols, and the high bit set.
         assert_eq!(base64(&[0xff, 0xef, 0xbe]), "/+++");
+    }
+
+    #[test]
+    fn overrides_split_on_the_first_equals_and_expand_home() {
+        let parsed = parse_overrides(
+            "# a note\n\n             Firefox = firefox --no-remote --profile ~/.webland/ff\n             Chromium = chromium --user-data-dir=~/w\n",
+            "/home/u",
+        );
+        assert_eq!(
+            parsed.get("firefox").map(String::as_str),
+            Some("firefox --no-remote --profile /home/u/.webland/ff")
+        );
+        // Only the first `=` separates; the one in the flag is the command's.
+        assert_eq!(
+            parsed.get("chromium").map(String::as_str),
+            Some("chromium --user-data-dir=/home/u/w")
+        );
+        assert_eq!(parsed.len(), 2);
+        // A `~` that is not a home directory is left alone.
+        assert_eq!(
+            parse_overrides("A = x ~backup file~", "/home/u")
+                .get("a")
+                .map(String::as_str),
+            Some("x ~backup file~")
+        );
     }
 
     #[test]
