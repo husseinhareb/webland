@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
-use web_sys::{Element, HtmlCanvasElement, KeyboardEvent, PointerEvent};
+use web_sys::{Element, HtmlCanvasElement, KeyboardEvent, PointerEvent, WheelEvent};
 use webland_core::Point;
 use webland_protocol::{ClientMessage, InputEvent, Press, encode};
 
@@ -64,6 +64,31 @@ pub fn wire(container: &Element, transport: Rc<WebSocketTransport>, latency: Rc<
         listener.forget();
     }
 
+    // Wheel. Without this the page scrolls under the desktop instead of the
+    // application scrolling inside its window, which is the wrong thing in the
+    // most confusing possible way: it looks like the click went somewhere.
+    {
+        let transport = transport.clone();
+        let listener = Closure::<dyn FnMut(WheelEvent)>::new(move |event: WheelEvent| {
+            if target_canvas(&event).is_none() {
+                return;
+            }
+            event.prevent_default();
+            let (dx, dy) = wheel_pixels(&event);
+            send(&transport, InputEvent::PointerScroll { dx, dy });
+        });
+        // Not passive, or `prevent_default` above is ignored and the page
+        // scrolls anyway.
+        let options = web_sys::AddEventListenerOptions::new();
+        options.set_passive(false);
+        let _ = container.add_event_listener_with_callback_and_add_event_listener_options(
+            "wheel",
+            listener.as_ref().unchecked_ref(),
+            &options,
+        );
+        listener.forget();
+    }
+
     // Keyboard, on the window so keys are captured without focusing the canvas.
     if let Some(window) = web_sys::window() {
         // What the compositor currently believes is held down. The compositor
@@ -86,6 +111,10 @@ pub fn wire(container: &Element, transport: Rc<WebSocketTransport>, latency: Rc<
                 let Some(keycode) = evdev_key(&event.code()) else {
                     return;
                 };
+                // This key belongs to the application now, so the browser must
+                // not also act on it — arrows and space scroll the page, tab
+                // walks the shell's own buttons, and `/` opens a find bar.
+                event.prevent_default();
                 if press == Press::Down {
                     latency.input_sent();
                 }
@@ -112,6 +141,20 @@ pub fn wire(container: &Element, transport: Rc<WebSocketTransport>, latency: Rc<
             listener.forget();
         }
     }
+}
+
+/// A wheel event's delta in pixels, whichever unit the browser chose to report.
+///
+/// `deltaMode` is pixels in Chrome but lines in Firefox, and a page for some
+/// mice; taking `deltaY` at face value scrolls three pixels or a whole screen.
+fn wheel_pixels(event: &WheelEvent) -> (f64, f64) {
+    // A line is about one line of text; a page, about a screen of them.
+    let scale = match event.delta_mode() {
+        WheelEvent::DOM_DELTA_LINE => 16.0,
+        WheelEvent::DOM_DELTA_PAGE => 400.0,
+        _ => 1.0,
+    };
+    (event.delta_x() * scale, event.delta_y() * scale)
 }
 
 /// Modifier name as the browser reports it, and the evdev keycodes that produce
@@ -302,6 +345,6 @@ fn aimed_at_shell(event: &KeyboardEvent) -> bool {
 }
 
 /// The canvas an event landed on, if it landed on one at all.
-fn target_canvas(event: &PointerEvent) -> Option<HtmlCanvasElement> {
+fn target_canvas(event: &web_sys::Event) -> Option<HtmlCanvasElement> {
     event.target()?.dyn_into::<HtmlCanvasElement>().ok()
 }

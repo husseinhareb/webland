@@ -44,7 +44,8 @@ pub mod encode;
 use smithay::backend::allocator::{Buffer, Fourcc, Modifier};
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::input::{
-    ButtonState, InputEvent as BackendInputEvent, KeyState, KeyboardKeyEvent, Keycode,
+    Axis, AxisSource, ButtonState, InputEvent as BackendInputEvent, KeyState, KeyboardKeyEvent,
+    Keycode,
 };
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::element::surface::{
@@ -60,7 +61,7 @@ use smithay::backend::renderer::{
 };
 use smithay::backend::winit::{self, WinitEvent};
 use smithay::input::keyboard::{FilterResult, KeyboardHandle, XkbConfig};
-use smithay::input::pointer::{ButtonEvent, MotionEvent, PointerHandle};
+use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent, PointerHandle};
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::backend::{
@@ -293,9 +294,29 @@ fn inject_input(
                 FilterResult::Forward
             });
         }
-        InputEvent::PointerScroll { .. } => {} // axis events: a later step
+        InputEvent::PointerScroll { dx, dy } => {
+            // The browser sends pixels. Clients want both: the continuous value
+            // for smooth scrolling, and v120 steps for the ones that only move
+            // by whole notches — 120 being one notch, as the wheel protocol has
+            // it. Sending neither is why nothing scrolled at all.
+            let mut frame = AxisFrame::new(time).source(AxisSource::Wheel);
+            for (axis, delta) in [(Axis::Horizontal, dx), (Axis::Vertical, dy)] {
+                if delta == 0.0 {
+                    continue;
+                }
+                frame = frame
+                    .value(axis, delta)
+                    .v120(axis, (delta / WHEEL_NOTCH * 120.0) as i32);
+            }
+            pointer.axis(state, frame);
+            pointer.frame(state);
+        }
     }
 }
+
+/// Pixels of scroll one wheel notch stands for, which is what a browser reports
+/// for one physical click of a mouse wheel.
+const WHEEL_NOTCH: f64 = 120.0;
 
 fn to_button_state(press: Press) -> ButtonState {
     match press {

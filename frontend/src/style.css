@@ -3,6 +3,14 @@
   font-family: system-ui, sans-serif;
 }
 
+/* A desktop is exactly the viewport. Let the document scroll and the arrow keys
+   move the page out from under the windows instead of reaching the client. */
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
 body {
   margin: 0;
   background: #101014;
