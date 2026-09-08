@@ -85,6 +85,9 @@ pub enum Codec {
 pub struct Application {
     pub id: u32,
     pub name: String,
+    /// The application's icon as a `data:` URL, when one was found — the
+    /// launcher is a list a person reads, and it reads faster with pictures.
+    pub icon: Option<String>,
 }
 
 /// A surface appeared; the browser should allocate a scene node for it.

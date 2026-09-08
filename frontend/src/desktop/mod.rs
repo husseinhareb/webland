@@ -190,6 +190,11 @@ fn Panel(
                 <div class="results">
                     <For each=matching key=|app| app.id let:app>
                         <button class="app" on:pointerdown=move |_| launch(app.id)>
+                            // An icon the theme did not have leaves a gap the
+                            // width of one, so the names stay in a column.
+                            <span class="icon">
+                                {app.icon.clone().map(|icon| view! { <img src=icon alt="" /> })}
+                            </span>
                             {app.name.clone()}
                         </button>
                     </For>
