@@ -10,6 +10,7 @@
 
 #![allow(clippy::missing_errors_doc)]
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use futures_util::{SinkExt, StreamExt};
@@ -22,47 +23,60 @@ use webland_protocol::{ClientMessage, ServerMessage, decode, encode};
 /// latency stays low; >1 so the pipeline does not stall on a single round trip.
 const INITIAL_CREDIT: i32 = 2;
 
-/// Per-connection frame pacing (Decision 3).
+/// Per-connection frame pacing (Decision 3), per surface.
 ///
 /// The browser acks every presented frame; the server sends only while it has
-/// credit, and while out of credit it keeps just the *newest* frame. In-flight
-/// depth is therefore bounded and the client's rate tracks the browser's actual
-/// presentation rate instead of running ahead into a growing queue.
+/// credit, and while out of credit it keeps just the *newest* frame for that
+/// surface. In-flight depth is therefore bounded and each client's rate tracks
+/// the browser's actual presentation rate rather than running ahead into a
+/// growing queue.
+///
+/// Everything is keyed by surface. A single pending slot shared by the whole
+/// desktop looks right with one window and quietly starves every window but one
+/// as soon as there are two: each surface's held frame is overwritten by the
+/// next surface to produce anything, so the others go blank and their titles
+/// never arrive.
 #[derive(Debug)]
 struct Pacer {
-    credit: i32,
-    pending: Option<ServerMessage>,
+    credit: HashMap<u64, i32>,
+    pending: HashMap<u64, ServerMessage>,
 }
 
 impl Pacer {
     fn new() -> Self {
         Self {
-            credit: INITIAL_CREDIT,
-            pending: None,
+            credit: HashMap::new(),
+            pending: HashMap::new(),
         }
     }
 
     /// A frame arrived from the compositor; returns what to send now, if any.
     fn on_frame(&mut self, message: ServerMessage) -> Option<ServerMessage> {
-        // Control messages (surface announcements) bypass pacing.
-        if matches!(message, ServerMessage::SurfaceCreated(_)) {
+        // Only frames are paced. Announcements, titles and destructions are
+        // small, rare, and useless late — a held title is a window captioned
+        // with a placeholder for as long as it stays still.
+        let ServerMessage::SurfaceFrame(frame) = &message else {
             return Some(message);
-        }
-        if self.credit > 0 {
-            self.credit -= 1;
+        };
+        let id = frame.id.0;
+        let credit = self.credit.entry(id).or_insert(INITIAL_CREDIT);
+        if *credit > 0 {
+            *credit -= 1;
             Some(message)
         } else {
-            self.pending = Some(message); // drop the stale one, keep the newest
+            // Drop this surface's stale frame, keep its newest.
+            self.pending.insert(id, message);
             None
         }
     }
 
-    /// The browser presented a frame; returns the next frame to send, if any.
-    fn on_ack(&mut self) -> Option<ServerMessage> {
-        self.credit += 1;
-        let next = self.pending.take();
+    /// The browser presented a frame of `id`; returns the next one to send.
+    fn on_ack(&mut self, id: u64) -> Option<ServerMessage> {
+        let credit = self.credit.entry(id).or_insert(INITIAL_CREDIT);
+        *credit += 1;
+        let next = self.pending.remove(&id);
         if next.is_some() {
-            self.credit -= 1;
+            *credit -= 1;
         }
         next
     }
@@ -229,7 +243,7 @@ pub fn spawn_server(
                                             Some(ClientMessage::FramePresented { id }) => {
                                                 let _ =
                                                     client_tx.send(ClientMessage::FramePresented { id });
-                                                if let Some(frame) = pacer.on_ack()
+                                                if let Some(frame) = pacer.on_ack(id.0)
                                                     && !connection.send(frame)
                                                 {
                                                     break;
@@ -278,11 +292,16 @@ mod tests {
     };
 
     fn frame(id: u64) -> ServerMessage {
+        tagged(id, 0)
+    }
+
+    /// A frame of `id` carrying `tag`, so one can be told from another.
+    fn tagged(id: u64, tag: u8) -> ServerMessage {
         ServerMessage::SurfaceFrame(webland_protocol::SurfaceFrame {
             id: SurfaceId(id),
             codec: webland_protocol::Codec::Raw,
             damage: Vec::new(),
-            payload: Vec::new(),
+            payload: vec![tag],
         })
     }
 
@@ -293,19 +312,65 @@ mod tests {
 
         // Up to INITIAL_CREDIT frames go out before any ack is required.
         for _ in 0..INITIAL_CREDIT {
-            assert!(pacer.on_frame(frame(1)).is_some());
+            assert!(pacer.on_frame(tagged(1, 0)).is_some());
         }
         // Out of credit: further frames are withheld, only the newest retained.
-        assert!(pacer.on_frame(frame(2)).is_none());
-        assert!(pacer.on_frame(frame(3)).is_none());
+        assert!(pacer.on_frame(tagged(1, 7)).is_none());
+        assert!(pacer.on_frame(tagged(1, 9)).is_none());
 
-        // An ack releases exactly the newest withheld frame (id 3, not 2).
-        match pacer.on_ack() {
-            Some(ServerMessage::SurfaceFrame(f)) => assert_eq!(f.id, SurfaceId(3)),
-            other => panic!("expected withheld frame 3, got {other:?}"),
+        // An ack releases exactly the newest withheld frame, not the stale one.
+        match pacer.on_ack(1) {
+            Some(ServerMessage::SurfaceFrame(f)) => assert_eq!(f.payload, vec![9]),
+            other => panic!("expected the newest withheld frame, got {other:?}"),
         }
         // Nothing pending now: the next ack releases nothing.
-        assert!(pacer.on_ack().is_none());
+        assert!(pacer.on_ack(1).is_none());
+    }
+
+    #[test]
+    fn pacer_starves_no_surface() {
+        use super::{INITIAL_CREDIT, Pacer};
+        let mut pacer = Pacer::new();
+
+        // One busy window must not spend another's credit, and must not
+        // overwrite what another has waiting. A single pending slot for the
+        // whole desktop did both: every window but the busiest went blank.
+        for _ in 0..INITIAL_CREDIT {
+            assert!(pacer.on_frame(frame(1)).is_some());
+            assert!(pacer.on_frame(frame(2)).is_some());
+        }
+        assert!(pacer.on_frame(tagged(1, 11)).is_none());
+        assert!(pacer.on_frame(tagged(2, 22)).is_none());
+
+        // Each surface gets its own frame back, not the other's.
+        match pacer.on_ack(2) {
+            Some(ServerMessage::SurfaceFrame(f)) => {
+                assert_eq!(f.id, SurfaceId(2));
+                assert_eq!(f.payload, vec![22]);
+            }
+            other => panic!("surface 2 should get its own held frame, got {other:?}"),
+        }
+        match pacer.on_ack(1) {
+            Some(ServerMessage::SurfaceFrame(f)) => {
+                assert_eq!(f.id, SurfaceId(1));
+                assert_eq!(f.payload, vec![11]);
+            }
+            other => panic!("surface 1's held frame should have survived, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pacer_lets_titles_through_while_out_of_credit() {
+        use super::Pacer;
+        let mut pacer = Pacer::new();
+        while pacer.on_frame(frame(1)).is_some() {}
+        // A title held until the window next redraws is a window captioned
+        // with a placeholder for as long as it sits still.
+        let title = ServerMessage::SurfaceTitle {
+            id: SurfaceId(1),
+            title: String::from("editor"),
+        };
+        assert!(pacer.on_frame(title).is_some());
     }
 
     #[test]
