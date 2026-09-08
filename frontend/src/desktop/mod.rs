@@ -108,8 +108,67 @@ pub fn Desktop() -> impl IntoView {
             <For each=move || ids.get() key=|id| *id let:id>
                 <Window id=id scene=scene transport=transport />
             </For>
+            <Panel scene=scene transport=transport />
         </main>
     }
+}
+
+/// The panel: one button per open window, and a clock.
+///
+/// With windows stacked on top of each other a buried one is unreachable, so
+/// this is what makes more than two of them usable at all. Raising from here is
+/// browser state like any other stacking change; only the focus that comes with
+/// it reaches the compositor.
+#[component]
+fn Panel(
+    scene: StoredValue<Scene, LocalStorage>,
+    transport: StoredValue<Option<Rc<WebSocketTransport>>, LocalStorage>,
+) -> impl IntoView {
+    let windows = scene.with_value(|scene| scene.windows);
+    let clock = RwSignal::new(now());
+    // A minute is the resolution shown, so that is the resolution ticked.
+    {
+        let listener = Closure::<dyn FnMut()>::new(move || clock.set(now()));
+        if let Some(window) = web_sys::window() {
+            let _ = window.set_interval_with_callback_and_timeout_and_arguments_0(
+                listener.as_ref().unchecked_ref(),
+                10_000,
+            );
+        }
+        listener.forget();
+    }
+
+    let raise = move |id: u64| {
+        scene.with_value(|scene| scene.raise(SurfaceId(id)));
+        if let Some(transport) = transport.get_value()
+            && let Ok(frame) = encode(&ClientMessage::Focus { id: SurfaceId(id) })
+        {
+            transport.send(&frame);
+        }
+    };
+
+    view! {
+        <footer id="webland-panel">
+            <div class="tasks">
+                <For
+                    each=move || windows.get()
+                    key=|window| (window.id, window.title.clone())
+                    let:window
+                >
+                    <button class="task" on:pointerdown=move |_| raise(window.id)>
+                        {window.title.clone()}
+                    </button>
+                </For>
+            </div>
+            <span class="clock">{move || clock.get()}</span>
+        </footer>
+    }
+}
+
+/// Wall clock as `HH:MM`, for the panel.
+fn now() -> String {
+    let date = js_sys::Date::new_0();
+    format!("{:02}:{:02}", date.get_hours(), date.get_minutes())
 }
 
 /// One window: chrome the browser owns, wrapped around a canvas the compositor

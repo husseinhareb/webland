@@ -73,6 +73,60 @@ body {
      match, so no scaling happens here. */
 }
 
+#webland-panel {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 0.75rem;
+  /* Above every window: a panel a window can cover is a panel you cannot use
+     to uncover that window. */
+  z-index: 2147483000;
+  background: #14141b;
+  border-top: 1px solid #262630;
+}
+
+#webland-panel .tasks {
+  flex: 1;
+  display: flex;
+  gap: 0.375rem;
+  overflow: hidden;
+}
+
+#webland-panel .task {
+  max-width: 14rem;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  padding: 0.3rem 0.7rem;
+  border: 1px solid #2a2a33;
+  border-radius: 0.375rem;
+  background: #1c1c24;
+  color: #c8c8d0;
+  font: 500 0.8rem/1 system-ui, sans-serif;
+  cursor: pointer;
+}
+
+#webland-panel .task:hover {
+  background: #262631;
+  color: #e6e6ea;
+}
+
+#webland-panel .clock {
+  color: #9a9aa6;
+  font: 500 0.8rem/1 system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Windows must not hide under the panel. */
+#webland-desktop {
+  padding-bottom: 40px;
+}
+
 .status:empty {
   display: none;
 }
