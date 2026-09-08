@@ -245,6 +245,32 @@ impl ClientData for ClientState {
     }
 }
 
+/// The Wayland object behind a surface id the browser named.
+///
+/// The browser only ever knows [`SurfaceId`]s, which are ours, so every message
+/// naming a window arrives needing this translation.
+fn object_for(known: &HashMap<ObjectId, Tracked>, id: SurfaceId) -> Option<ObjectId> {
+    known
+        .iter()
+        .find(|(_, tracked)| tracked.id == id)
+        .map(|(object, _)| object.clone())
+}
+
+/// The toplevel a surface id names, if it is still around.
+fn toplevel_for(
+    state: &Webland,
+    known: &HashMap<ObjectId, Tracked>,
+    id: SurfaceId,
+) -> Option<ToplevelSurface> {
+    let object = object_for(known, id)?;
+    state
+        .xdg_shell_state
+        .toplevel_surfaces()
+        .iter()
+        .find(|toplevel| toplevel.wl_surface().id() == object)
+        .cloned()
+}
+
 /// Inject one browser-originated input event into the seat, targeting `surface`.
 fn inject_input(
     state: &mut Webland,
@@ -857,6 +883,7 @@ fn drain_client(
     let mut resize = None;
     let mut closing = Vec::new();
     let mut launching = Vec::new();
+    let mut maximizing = Vec::new();
     while let Some(message) = poll() {
         match message {
             ClientMessage::Input(event) => events.push(event),
@@ -875,6 +902,7 @@ fn drain_client(
             ClientMessage::Resize { size } => resize = Some(size),
             ClientMessage::CloseSurface { id } => closing.push(id),
             ClientMessage::Launch { id } => launching.push(id),
+            ClientMessage::SetMaximized { id, size } => maximizing.push((id, size)),
         }
     }
     for id in launching {
@@ -882,18 +910,31 @@ fn drain_client(
     }
 
     for id in closing {
-        let object = known
-            .iter()
-            .find(|(_, tracked)| tracked.id == id)
-            .map(|(object, _)| object.clone());
-        if let Some(toplevel) = state
-            .xdg_shell_state
-            .toplevel_surfaces()
-            .iter()
-            .find(|toplevel| Some(toplevel.wl_surface().id()) == object)
-        {
+        if let Some(toplevel) = toplevel_for(state, known, id) {
             toplevel.send_close();
         }
+    }
+
+    // Maximizing is the client's job: it is told the size and the state, and
+    // redraws itself to fit. The shell only moves the window to the corner.
+    for (id, size) in maximizing {
+        let Some(toplevel) = toplevel_for(state, known, id) else {
+            continue;
+        };
+        toplevel.with_pending_state(|pending| {
+            // `None` leaves the size to the client, which is how it gets back
+            // to whatever it was before being maximized.
+            #[allow(clippy::cast_possible_wrap)]
+            {
+                pending.size = size.map(|s| (s.width as i32, s.height as i32).into());
+            }
+            if size.is_some() {
+                pending.states.set(xdg_toplevel::State::Maximized);
+            } else {
+                pending.states.unset(xdg_toplevel::State::Maximized);
+            }
+        });
+        toplevel.send_configure();
     }
 
     // Reconfigure every toplevel when the browser's window changes size. The
@@ -915,12 +956,7 @@ fn drain_client(
 
     // Input goes to the surface the browser raised; before it has raised
     // anything, to whichever surface exists.
-    let focused = state.focus.and_then(|id| {
-        known
-            .iter()
-            .find(|(_, tracked)| tracked.id == id)
-            .map(|(object, _)| object.clone())
-    });
+    let focused = state.focus.and_then(|id| object_for(known, id));
     let toplevels = state.xdg_shell_state.toplevel_surfaces();
     let target = toplevels
         .iter()

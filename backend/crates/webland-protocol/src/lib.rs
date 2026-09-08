@@ -183,6 +183,17 @@ pub enum ClientMessage {
     /// A request, not an order: the client may put up a save dialog, or ignore
     /// it. The surface goes away when the client says so, via `SurfaceDestroyed`.
     CloseSurface { id: SurfaceId },
+    /// Maximize this surface to `size`, or restore it when `size` is `None`.
+    ///
+    /// Maximizing is the one window-management gesture the compositor has to
+    /// hear about, because only the client can act on it: a shell that merely
+    /// stretched the window would be scaling a smaller surface over a bigger
+    /// box. The browser sends the size because the browser is the display and
+    /// knows what is left over once its own panel has taken its strip.
+    ///
+    /// Minimizing sends nothing: a hidden window is browser-side state, exactly
+    /// as moving and restacking are.
+    SetMaximized { id: SurfaceId, size: Option<Size> },
     /// The size the browser wants surfaces configured at, in device pixels.
     ///
     /// Headless has no output, so without this the compositor invents a size

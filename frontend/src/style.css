@@ -59,7 +59,7 @@ body {
   color: #c8c8d0;
 }
 
-.close {
+.titlebar button {
   border: 0;
   border-radius: 0.25rem;
   width: 22px;
@@ -70,6 +70,13 @@ body {
   cursor: pointer;
 }
 
+.titlebar button:hover {
+  background: #2a2a33;
+  color: #fff;
+}
+
+/* Close is the only one that can lose work, so it is the only one with a
+   colour. */
 .close:hover {
   background: #a03040;
   color: #fff;

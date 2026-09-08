@@ -68,6 +68,26 @@ fn window_size() -> Option<Size> {
     })
 }
 
+/// The whole desktop, in device pixels: everything the panel has not taken.
+///
+/// Measured rather than assumed, so the panel's height lives in the stylesheet
+/// alone and the two cannot drift apart.
+fn maximized_size() -> Option<Size> {
+    let window = web_sys::window()?;
+    let ratio = crate::scene::pixel_ratio();
+    let panel = window
+        .document()
+        .and_then(|document| document.query_selector("#webland-panel").ok().flatten())
+        .map_or(0.0, |panel| f64::from(panel.client_height()));
+    let width = window.inner_width().ok()?.as_f64()? * ratio;
+    let height = (window.inner_height().ok()?.as_f64()? - panel) * ratio;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Some(Size {
+        width: (width.max(2.0)) as u32,
+        height: (height.max(2.0)) as u32,
+    })
+}
+
 #[component]
 pub fn Desktop() -> impl IntoView {
     let status = RwSignal::new(String::from("connecting…"));
@@ -142,7 +162,12 @@ fn Panel(
     }
 
     let raise = move |id: u64| {
-        scene.with_value(|scene| scene.raise(SurfaceId(id)));
+        scene.with_value(|scene| {
+            // The panel is the only way back from minimized, so its button
+            // un-hides as well as raises.
+            scene.set_minimized(id, false);
+            scene.raise(SurfaceId(id));
+        });
         if let Some(transport) = transport.get_value()
             && let Ok(frame) = encode(&ClientMessage::Focus { id: SurfaceId(id) })
         {
@@ -293,6 +318,17 @@ fn Window(
 
     let close = move |_: PointerEvent| send(&ClientMessage::CloseSurface { id: SurfaceId(id) });
 
+    let minimize = move |_: PointerEvent| scene.with_value(|scene| scene.set_minimized(id, true));
+
+    let toggle_maximize = move |_: PointerEvent| {
+        let maximize = !scene.with_value(|scene| scene.is_maximized(id));
+        scene.with_value(|scene| scene.set_maximized(id, maximize));
+        send(&ClientMessage::SetMaximized {
+            id: SurfaceId(id),
+            size: if maximize { maximized_size() } else { None },
+        });
+    };
+
     // Raising and focusing are one gesture: the browser stacks, the compositor
     // only learns who has the seat.
     let focus = move |_: PointerEvent| {
@@ -315,8 +351,12 @@ fn Window(
     let style = move || {
         state().map_or_else(String::new, |w| {
             let ratio = crate::scene::pixel_ratio();
+            // Hidden with `display`, never unmounted: tearing the row down would
+            // take the canvas with it and leave the renderer drawing into a
+            // detached one, which succeeds and shows nothing ever after.
+            let hidden = if w.minimized { "display:none;" } else { "" };
             format!(
-                "left:{}px; top:{}px; z-index:{}; width:{}px;",
+                "left:{}px; top:{}px; z-index:{}; width:{}px; {hidden}",
                 w.x,
                 w.y,
                 w.z,
@@ -335,6 +375,8 @@ fn Window(
             <div class="titlebar" on:pointerdown=start_drag on:pointermove=do_drag
                  on:pointerup=end_drag on:pointercancel=end_drag>
                 <span class="title">{title}</span>
+                <button class="minimize" on:pointerdown=minimize title="Minimize">"–"</button>
+                <button class="maximize" on:pointerdown=toggle_maximize title="Maximize">"□"</button>
                 <button class="close" on:pointerdown=close title="Close">"×"</button>
             </div>
             // One bitmap pixel per *device* pixel. Dividing by the ratio is

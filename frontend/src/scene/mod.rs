@@ -45,6 +45,13 @@ pub struct WindowState {
     pub x: i32,
     pub y: i32,
     pub z: i32,
+    /// Hidden, but still open and still streaming. The panel is how it comes
+    /// back, which is why a minimized window keeps its task button.
+    pub minimized: bool,
+    /// Where the window sat before it was maximized — so `Some` is what it
+    /// means to be maximized, and there is no way to be maximized with nowhere
+    /// to go back to.
+    pub restore: Option<(i32, i32)>,
 }
 
 /// What actually paints a surface, once its canvas exists in the DOM.
@@ -125,6 +132,8 @@ impl Scene {
                         x: 40 + offset,
                         y: 40 + offset,
                         z: 0,
+                        minimized: false,
+                        restore: None,
                     });
                 });
                 self.raise(created.id);
@@ -236,5 +245,47 @@ impl Scene {
                 window.y = y;
             }
         });
+    }
+
+    /// Hide a window, or bring it back. Browser state; the client goes on
+    /// drawing, and never learns it is not being looked at.
+    pub fn set_minimized(&self, id: u64, minimized: bool) {
+        self.windows.update(|ws| {
+            if let Some(window) = ws.iter_mut().find(|w| w.id == id) {
+                window.minimized = minimized;
+            }
+        });
+    }
+
+    /// Send a window to the corner, or back where it came from.
+    ///
+    /// Only the corner: the size is the client's answer to the configure the
+    /// caller sends, and arrives later as a fresh `SurfaceCreated`.
+    pub fn set_maximized(&self, id: u64, maximized: bool) {
+        self.windows.update(|ws| {
+            let Some(window) = ws.iter_mut().find(|w| w.id == id) else {
+                return;
+            };
+            match (maximized, window.restore) {
+                (true, None) => {
+                    window.restore = Some((window.x, window.y));
+                    window.x = 0;
+                    window.y = 0;
+                }
+                (false, Some((x, y))) => {
+                    window.restore = None;
+                    window.x = x;
+                    window.y = y;
+                }
+                _ => {}
+            }
+        });
+    }
+
+    /// Whether a window is currently maximized.
+    #[must_use]
+    pub fn is_maximized(&self, id: u64) -> bool {
+        self.windows
+            .with_untracked(|ws| ws.iter().any(|w| w.id == id && w.restore.is_some()))
     }
 }
