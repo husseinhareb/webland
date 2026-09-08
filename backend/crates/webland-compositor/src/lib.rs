@@ -50,12 +50,14 @@ use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::element::surface::{
     WaylandSurfaceRenderElement, render_elements_from_surface_tree,
 };
-use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::utils::{
-    CommitCounter, draw_render_elements, on_commit_buffer_handler, with_renderer_surface_state,
+    CommitCounter, RendererSurfaceStateUserData, draw_render_elements, on_commit_buffer_handler,
+    with_renderer_surface_state,
 };
-use smithay::backend::renderer::{Color32F, Frame, Renderer};
-use smithay::backend::renderer::{ExportMem, ImportDma};
+use smithay::backend::renderer::{
+    Bind, Color32F, ExportMem, Frame, ImportDma, Offscreen, Renderer,
+};
 use smithay::backend::winit::{self, WinitEvent};
 use smithay::input::keyboard::{FilterResult, KeyboardHandle, XkbConfig};
 use smithay::input::pointer::{ButtonEvent, MotionEvent, PointerHandle};
@@ -69,11 +71,11 @@ use smithay::reexports::wayland_server::protocol::wl_seat;
 use smithay::reexports::wayland_server::protocol::wl_surface::{self, WlSurface};
 use smithay::reexports::wayland_server::{Client, Display, ListeningSocket, Resource};
 use smithay::reexports::winit::platform::pump_events::PumpStatus;
-use smithay::utils::{Rectangle, SERIAL_COUNTER, Serial, Transform};
+use smithay::utils::{Logical, Rectangle, SERIAL_COUNTER, Serial, Transform};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes, TraversalAction,
-    with_surface_tree_downward,
+    get_children, with_surface_tree_downward,
 };
 use smithay::wayland::dmabuf::{
     DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier, get_dmabuf,
@@ -83,7 +85,8 @@ use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
 };
 use smithay::wayland::shell::xdg::{
-    PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+    PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface, XdgShellHandler,
+    XdgShellState,
 };
 use smithay::wayland::shm::{ShmHandler, ShmState, with_buffer_contents};
 use smithay::{
@@ -563,6 +566,12 @@ fn toplevel_title(surface: &WlSurface) -> Option<String> {
 
 /// Describe a surface's committed dmabuf, if it committed one.
 fn dmabuf_planes(surface: &WlSurface) -> Option<Planes> {
+    // Only a client that draws its whole window into one buffer can hand that
+    // buffer straight to the encoder. One with subsurfaces has to be composited
+    // first, and `capture` does that.
+    if !get_children(surface).is_empty() {
+        return None;
+    }
     let buffer = with_renderer_surface_state(surface, |s| s.buffer().cloned())??;
     let dmabuf = get_dmabuf(&buffer).ok()?;
     let format = dmabuf.format();
@@ -587,10 +596,119 @@ fn dmabuf_planes(surface: &WlSurface) -> Option<Planes> {
 /// Copy a surface's committed contents, tightly packed, whichever kind of buffer
 /// the client committed.
 fn capture(renderer: Option<&mut GlesRenderer>, surface: &WlSurface) -> Option<(Size, Vec<u8>)> {
+    // A client with subsurfaces has to be composited, which needs a renderer —
+    // so under winit, which has none to spare here, such a window sends nothing.
+    if !get_children(surface).is_empty() {
+        return capture_tree(renderer?, surface);
+    }
     match capture_shm(surface) {
         Some(captured) => Some(captured),
         None => capture_dmabuf(renderer?, surface),
     }
+}
+
+/// The window's own rectangle within its surface tree, which a decorated client
+/// sets to exclude the shadow it draws around itself.
+///
+/// Falls back to the toplevel's whole buffer for a client that sets no geometry:
+/// that brings the shadow along, which still beats a black window.
+fn window_geometry(surface: &WlSurface) -> Option<Rectangle<i32, Logical>> {
+    let geometry = smithay::wayland::compositor::with_states(surface, |states| {
+        states
+            .cached_state
+            .get::<SurfaceCachedState>()
+            .current()
+            .geometry
+    });
+    if let Some(geometry) = geometry {
+        return Some(geometry);
+    }
+    let size = with_renderer_surface_state(surface, |s| s.buffer_size())??;
+    Some(Rectangle::from_size((size.w, size.h).into()))
+}
+
+/// Composite a surface and its subsurfaces into one image.
+///
+/// A client with client-side decorations — every GTK app, Firefox among them —
+/// commits only the shadow frame to its toplevel and puts the window's actual
+/// contents in a subsurface. Reading the toplevel's own buffer therefore gives
+/// a black window, so render the whole tree and read that back instead.
+///
+/// ponytail: a texture allocated per frame, then read back to the CPU — which
+/// costs such a client the zero-copy path, landing it on the CPU encoder like an
+/// shm client. Rendering into one gbm-allocated dmabuf held across frames and
+/// handing the encoder its fds is the upgrade.
+fn capture_tree(renderer: &mut GlesRenderer, surface: &WlSurface) -> Option<(Size, Vec<u8>)> {
+    let geometry = window_geometry(surface)?;
+    let (width, height) = (geometry.size.w, geometry.size.h);
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+
+    let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+        render_elements_from_surface_tree(
+            renderer,
+            surface,
+            (-geometry.loc.x, -geometry.loc.y),
+            1.0,
+            1.0,
+            Kind::Unspecified,
+        );
+
+    let mut texture: GlesTexture = renderer
+        .create_buffer(Fourcc::Argb8888, (width, height).into())
+        .ok()?;
+    // Scoped so the framebuffer releases the texture before it is read back.
+    {
+        let damage = [Rectangle::from_size((width, height).into())];
+        let mut framebuffer = renderer.bind(&mut texture).ok()?;
+        let mut frame = renderer
+            .render(&mut framebuffer, (width, height).into(), Transform::Normal)
+            .ok()?;
+        frame
+            .clear(Color32F::new(0.0, 0.0, 0.0, 0.0), &damage)
+            .ok()?;
+        draw_render_elements(&mut frame, 1.0, &elements, &damage).ok()?;
+        // Waited on, not dropped: the readback below must see finished pixels.
+        frame.finish().ok()?.wait().ok()?;
+    }
+    let mapping = renderer
+        .copy_texture(
+            &texture,
+            Rectangle::from_size((width, height).into()),
+            Fourcc::Argb8888,
+        )
+        .ok()?;
+    let size = Size {
+        width: width as u32,
+        height: height as u32,
+    };
+    Some((size, renderer.map_texture(&mapping).ok()?.to_vec()))
+}
+
+/// Every commit counter in a surface tree.
+///
+/// A desynchronised subsurface — which is how a decorated client draws its next
+/// frame — commits without touching the toplevel, so watching the toplevel's own
+/// counter would freeze the window on whatever it showed first.
+fn tree_commits(root: &WlSurface) -> Vec<CommitCounter> {
+    let mut commits = Vec::new();
+    with_surface_tree_downward(
+        root,
+        (),
+        |_, _, &()| TraversalAction::DoChildren(()),
+        |_, states, &()| {
+            // Read the state here rather than through `with_renderer_surface_state`:
+            // that re-enters the lock this traversal already holds, and deadlocks.
+            if let Some(data) = states.data_map.get::<RendererSurfaceStateUserData>()
+                && let Ok(state) = data.lock()
+            {
+                commits.push(state.current_commit());
+            }
+        },
+        |_, _, &()| true,
+    );
+    commits
 }
 
 /// Copy a surface's committed dmabuf contents by way of the GPU.
@@ -807,9 +925,9 @@ fn drain_client(
 struct Tracked {
     id: SurfaceId,
     size: Option<Size>,
-    /// The commit the browser's pixels came from, so an untouched surface costs
-    /// nothing to skip.
-    commit: Option<CommitCounter>,
+    /// The commits the browser's pixels came from — one per surface in the
+    /// tree — so an untouched window costs nothing to skip.
+    commits: Vec<CommitCounter>,
     /// The pixels the browser is holding, to diff the next capture against.
     /// Only the deflate path needs these; H.264 keeps its own reference frames.
     pixels: Vec<u8>,
@@ -856,17 +974,15 @@ fn stream_dirty(
             Tracked {
                 id,
                 size: None,
-                commit: None,
+                commits: Vec::new(),
                 pixels: Vec::new(),
                 encoder: None,
                 clock: FrameClock::new(),
                 title: None,
             }
         });
-        let Some(commit) = with_renderer_surface_state(surface, |s| s.current_commit()) else {
-            continue;
-        };
-        if tracked.commit == Some(commit) && !keyframe {
+        let commits = tree_commits(surface);
+        if commits.is_empty() || (tracked.commits == commits && !keyframe) {
             continue;
         }
         // Prefer the client's own GPU buffer: its dimensions are known without
@@ -883,7 +999,7 @@ fn stream_dirty(
                 _ => continue,
             },
         };
-        tracked.commit = Some(commit);
+        tracked.commits = commits;
 
         // A resize invalidates whatever the browser is holding, and so does a
         // browser that has just joined: both take the whole surface.
