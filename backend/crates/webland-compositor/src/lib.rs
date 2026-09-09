@@ -884,6 +884,7 @@ fn drain_client(
     let mut closing = Vec::new();
     let mut launching = Vec::new();
     let mut maximizing = Vec::new();
+    let mut sizing = Vec::new();
     while let Some(message) = poll() {
         match message {
             ClientMessage::Input(event) => events.push(event),
@@ -903,6 +904,7 @@ fn drain_client(
             ClientMessage::CloseSurface { id } => closing.push(id),
             ClientMessage::Launch { id } => launching.push(id),
             ClientMessage::SetMaximized { id, size } => maximizing.push((id, size)),
+            ClientMessage::SetSize { id, size } => sizing.push((id, size)),
         }
     }
     for id in launching {
@@ -933,6 +935,24 @@ fn drain_client(
             } else {
                 pending.states.unset(xdg_toplevel::State::Maximized);
             }
+        });
+        toplevel.send_configure();
+    }
+
+    // A resize grip is the same configure, minus the state: the client is told
+    // a size and redraws at it. Maximized comes off, because a window the user
+    // has just dragged to a size of their own is not maximized any more — and a
+    // client left flagged maximized would keep drawing as if it were.
+    for (id, size) in sizing {
+        let Some(toplevel) = toplevel_for(state, known, id) else {
+            continue;
+        };
+        toplevel.with_pending_state(|pending| {
+            #[allow(clippy::cast_possible_wrap)]
+            {
+                pending.size = Some((size.width.max(1) as i32, size.height.max(1) as i32).into());
+            }
+            pending.states.unset(xdg_toplevel::State::Maximized);
         });
         toplevel.send_configure();
     }

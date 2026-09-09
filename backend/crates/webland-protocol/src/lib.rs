@@ -194,6 +194,14 @@ pub enum ClientMessage {
     /// Minimizing sends nothing: a hidden window is browser-side state, exactly
     /// as moving and restacking are.
     SetMaximized { id: SurfaceId, size: Option<Size> },
+    /// Configure this surface at `size`, as a resize grip does.
+    ///
+    /// Same reason as `SetMaximized`: only the client can redraw at a new size,
+    /// and a shell that stretched the box instead would be scaling a surface
+    /// rendered for a smaller one. Sent when the gesture ends rather than
+    /// throughout it — every configure costs the client a reallocation and the
+    /// wire a keyframe, so a drag would spend hundreds for one useful answer.
+    SetSize { id: SurfaceId, size: Size },
     /// The size the browser wants surfaces configured at, in device pixels.
     ///
     /// Headless has no output, so without this the compositor invents a size
@@ -259,6 +267,28 @@ mod tests {
         });
         let frame = encode(&msg).unwrap();
         assert_eq!(msg, decode::<ClientMessage>(&frame).unwrap());
+    }
+
+    /// The resize grip's message carries a size, and a variant added after
+    /// `SetMaximized` must not be decoded as it: both name a surface and a size,
+    /// so a mis-tagged one would silently maximize a window being resized.
+    #[test]
+    fn set_size_round_trips_and_is_not_set_maximized() {
+        let size = Size {
+            width: 800,
+            height: 600,
+        };
+        let msg = ClientMessage::SetSize {
+            id: SurfaceId(7),
+            size,
+        };
+        let frame = encode(&msg).unwrap();
+        assert_eq!(msg, decode::<ClientMessage>(&frame).unwrap());
+        let maximized = ClientMessage::SetMaximized {
+            id: SurfaceId(7),
+            size: Some(size),
+        };
+        assert_ne!(frame, encode(&maximized).unwrap());
     }
 
     #[test]

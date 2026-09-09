@@ -43,6 +43,10 @@ fn backend() -> String {
     format!("{scheme}://{host}{BACKEND_PATH}")
 }
 
+/// The smallest a window may be dragged, in device pixels. Small enough to be
+/// no real limit, large enough that a window can never lose its own grip.
+const MIN_SURFACE: f64 = 160.0;
+
 /// How much of the desktop a newly opened window takes up.
 const WINDOW_FRACTION: f64 = 0.62;
 
@@ -316,6 +320,62 @@ fn Window(
     };
     let end_drag = move |_: PointerEvent| grab.with_value(|grab| grab.set(None));
 
+    // Resizing by the corner grip. Same shape as the drag: the anchor is where
+    // the pointer was when the gesture began, held for as long as it lasts.
+    let stretch: Rc<Cell<Option<(f64, f64, u32, u32)>>> = Rc::new(Cell::new(None));
+    let stretch = StoredValue::new_local(stretch);
+
+    let start_resize = move |event: PointerEvent| {
+        scene.with_value(|scene| {
+            scene.raise(SurfaceId(id));
+            let (width, height) = window_size_of(scene, id);
+            stretch.with_value(|stretch| {
+                stretch.set(Some((
+                    f64::from(event.client_x()),
+                    f64::from(event.client_y()),
+                    width,
+                    height,
+                )));
+            });
+        });
+        // The grip keeps receiving moves once the pointer leaves it, which for a
+        // grip a few pixels wide is immediately.
+        if let Some(target) = event
+            .target()
+            .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+        {
+            let _ = target.set_pointer_capture(event.pointer_id());
+        }
+    };
+    let do_resize = move |event: PointerEvent| {
+        let Some((from_x, from_y, width, height)) = stretch.with_value(|stretch| stretch.get()) else {
+            return;
+        };
+        // The grip moves in CSS pixels; surfaces are measured in device pixels.
+        let ratio = crate::scene::pixel_ratio();
+        let dx = (f64::from(event.client_x()) - from_x) * ratio;
+        let dy = (f64::from(event.client_y()) - from_y) * ratio;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let (width, height) = (
+            (f64::from(width) + dx).max(MIN_SURFACE) as u32,
+            (f64::from(height) + dy).max(MIN_SURFACE) as u32,
+        );
+        scene.with_value(|scene| scene.resize_to(id, width, height));
+    };
+    let end_resize = move |_: PointerEvent| {
+        if stretch.with_value(|stretch| stretch.take()).is_none() {
+            return;
+        }
+        // Told once, at the end. Every configure costs the client a
+        // reallocation and the wire a keyframe, so a drag that sent one per
+        // pointermove would spend hundreds of them to answer one question.
+        let (width, height) = scene.with_value(|scene| window_size_of(scene, id));
+        send(&ClientMessage::SetSize {
+            id: SurfaceId(id),
+            size: Size { width, height },
+        });
+    };
+
     let close = move |_: PointerEvent| send(&ClientMessage::CloseSurface { id: SurfaceId(id) });
 
     let minimize = move |_: PointerEvent| scene.with_value(|scene| scene.set_minimized(id, true));
@@ -393,8 +453,19 @@ fn Window(
                         )
                     }
                     on:pointerdown=focus></canvas>
+            <div class="grip" on:pointerdown=start_resize on:pointermove=do_resize
+                 on:pointerup=end_resize on:pointercancel=end_resize
+                 title="Resize"></div>
         </div>
     }
+}
+
+/// The size a window is currently drawn at, for resize arithmetic.
+fn window_size_of(scene: &Scene, id: u64) -> (u32, u32) {
+    scene
+        .windows
+        .with_untracked(|ws| ws.iter().find(|w| w.id == id).map(|w| (w.width, w.height)))
+        .unwrap_or((1, 1))
 }
 
 /// A window's current top-left corner, for drag arithmetic.

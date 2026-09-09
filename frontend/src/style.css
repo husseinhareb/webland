@@ -85,7 +85,27 @@ body {
 .window canvas {
   display: block;
   /* The canvas is the surface at its own resolution; the window is sized to
-     match, so no scaling happens here. */
+     match, so no scaling happens here — except for the length of a resize
+     drag, when the box runs ahead of the client and the last frame is stretched
+     until the client answers the configure at the new size. */
+}
+
+/* The resize grip: a corner of the window, not a widget in it. Above the canvas
+   so the surface underneath never swallows the gesture. */
+.grip {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  /* Two hairlines, the conventional corner hatching. */
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent 0 3px,
+    #4a4a58 3px 4px
+  );
+  touch-action: none;
 }
 
 #webland-panel {

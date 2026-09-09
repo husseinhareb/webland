@@ -127,8 +127,12 @@ Window chrome, stacking, the panel and the launcher are drawn by the browser in
 HTML and CSS, so they cost the compositor nothing. Dragging, raising and
 minimizing a window cost no pixels at all. Raising one sends a few bytes, and
 only because there is a single seat and the compositor has to know who is
-holding it. Maximizing is the one gesture the client itself must act on: it is
-told to redraw at the new size rather than be stretched up from a smaller one.
+holding it. Maximizing and resizing are the gestures the client itself must act
+on: it is told to redraw at the new size rather than be stretched up from a
+smaller one. The corner grip sends that size once, when the drag ends — every
+configure costs the client a reallocation and the wire a keyframe, so the last
+frame is stretched for the length of the gesture and sharpens when the client
+answers.
 
 The launcher lists what it finds in `.desktop` files, with their icons. An
 application that will not start from a generic `Exec` line — anything that hands

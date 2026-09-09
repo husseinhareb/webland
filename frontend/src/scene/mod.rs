@@ -165,15 +165,11 @@ impl Scene {
     fn paint(&self, view: &View, frame: SurfaceFrame) {
         if frame.codec == Codec::H264 {
             if let Some(decoder) = view.decoder.as_ref() {
-                let (width, height) = self
-                    .windows
-                    .with_untracked(|ws| {
-                        ws.iter()
-                            .find(|w| w.id == frame.id.0)
-                            .map(|w| (w.width, w.height))
-                    })
-                    .unwrap_or((0, 0));
-                decoder.decode(&frame.payload, width, height);
+                // The canvas bitmap, not the window state: the bitmap is by
+                // definition what the client last rendered at, while the state's
+                // size is the box on screen — which a resize grip drags ahead of
+                // the client for the length of the gesture.
+                decoder.decode(&frame.payload, view.canvas.width(), view.canvas.height());
             }
         } else {
             view.renderer
@@ -278,6 +274,21 @@ impl Scene {
                     window.y = y;
                 }
                 _ => {}
+            }
+        });
+    }
+
+    /// Set a window's box while a resize grip is being dragged.
+    ///
+    /// Only the box. The canvas bitmap keeps the size the client last rendered
+    /// at, so CSS stretches the last frame for the length of the gesture — the
+    /// client is told once, on release, and the sharp redraw comes back as a
+    /// fresh `SurfaceCreated`.
+    pub fn resize_to(&self, id: u64, width: u32, height: u32) {
+        self.windows.update(|ws| {
+            if let Some(window) = ws.iter_mut().find(|w| w.id == id) {
+                window.width = width;
+                window.height = height;
             }
         });
     }
