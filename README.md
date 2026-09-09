@@ -14,9 +14,9 @@ browser already holds every window, so moving, stacking and minimizing one are
 local and send nothing at all.
 
 **Status: the desktop runs.** Zero-copy dmabuf to VA-API to WebCodecs, a
-browser-driven frame clock, and a shell with window chrome, a panel and a
-launcher. Workspaces, notifications, menus and settings do not exist yet, and
-the protocol is unauthenticated. See [docs/roadmap.md](docs/roadmap.md) for the
+browser-driven frame clock, and a shell with window chrome, a panel, a launcher
+and workspaces. Notifications, menus and settings do not exist yet, and the
+protocol is unauthenticated. See [docs/roadmap.md](docs/roadmap.md) for the
 order of work.
 
 ## Layout
@@ -133,6 +133,13 @@ smaller one. The corner grip sends that size once, when the drag ends — every
 configure costs the client a reallocation and the wire a keyframe, so the last
 frame is stretched for the length of the gesture and sharpens when the client
 answers.
+
+Workspaces are the clearest case of the architecture paying off: the browser
+already holds every window, so a workspace is a filter over state it has, and
+switching sends nothing at all. Four of them, in the panel; drag a window onto
+one to send it there. Windows on a workspace you are not looking at are hidden
+exactly as minimized ones are — and, like minimized ones, still streaming, which
+is the encode cost to revisit if window counts grow.
 
 The launcher lists what it finds in `.desktop` files, with their icons. An
 application that will not start from a generic `Exec` line — anything that hands

@@ -43,6 +43,15 @@ fn backend() -> String {
     format!("{scheme}://{host}{BACKEND_PATH}")
 }
 
+/// How many workspaces there are. Fixed at the usual four: a count nobody
+/// changes is not a setting, and empty ones cost nothing.
+const WORKSPACES: u32 = 4;
+
+/// Where a resize began: the pointer, and the size the window had then. Deltas
+/// are taken from the start rather than the last move, so rounding cannot
+/// accumulate over a long drag.
+type Stretch = (f64, f64, u32, u32);
+
 /// The smallest a window may be dragged, in device pixels. Small enough to be
 /// no real limit, large enough that a window can never lose its own grip.
 const MIN_SURFACE: f64 = 160.0;
@@ -150,6 +159,7 @@ fn Panel(
 ) -> impl IntoView {
     let windows = scene.with_value(|scene| scene.windows);
     let applications = scene.with_value(|scene| scene.applications);
+    let current = scene.with_value(|scene| scene.workspace);
     let open = RwSignal::new(false);
     let filter = RwSignal::new(String::new());
     let clock = RwSignal::new(now());
@@ -229,9 +239,27 @@ fn Panel(
                     </For>
                 </div>
             </div>
+            <div class="workspaces">
+                <For each=move || 0..WORKSPACES key=|n| *n let:n>
+                    <button
+                        class="workspace"
+                        class:here=move || current.get() == n
+                        data-workspace=n.to_string()
+                        title="Workspace — drop a window here to send it"
+                        on:pointerdown=move |_| current.set(n)
+                    >
+                        {(n + 1).to_string()}
+                    </button>
+                </For>
+            </div>
             <div class="tasks">
+                // Only this workspace's windows. A task list showing every
+                // window on every workspace is the thing workspaces exist to
+                // stop.
                 <For
-                    each=move || windows.get()
+                    each=move || {
+                        windows.get().into_iter().filter(|w| w.workspace == current.get()).collect::<Vec<_>>()
+                    }
                     key=|window| (window.id, window.title.clone())
                     let:window
                 >
@@ -304,6 +332,10 @@ fn Window(
                 )));
             });
         });
+        // Capture, so the bar keeps the gesture once the pointer leaves it: over
+        // the panel, which sits above every window, and whenever a fast drag
+        // outruns the window it is moving.
+        capture(&event);
     };
     let do_drag = move |event: PointerEvent| {
         let held = grab.with_value(|grab| grab.get());
@@ -318,11 +350,22 @@ fn Window(
             });
         }
     };
-    let end_drag = move |_: PointerEvent| grab.with_value(|grab| grab.set(None));
+    // Dropping a window on a workspace button sends it there. The gesture is
+    // already in hand — this only asks what is under the pointer when it ends —
+    // and dragging a window onto a workspace is the idiom every desktop uses,
+    // so it needs no affordance of its own.
+    let end_drag = move |event: PointerEvent| {
+        if grab.with_value(|grab| grab.take()).is_none() {
+            return;
+        }
+        if let Some(workspace) = workspace_under(&event) {
+            scene.with_value(|scene| scene.send_to_workspace(id, workspace));
+        }
+    };
 
     // Resizing by the corner grip. Same shape as the drag: the anchor is where
     // the pointer was when the gesture began, held for as long as it lasts.
-    let stretch: Rc<Cell<Option<(f64, f64, u32, u32)>>> = Rc::new(Cell::new(None));
+    let stretch: Rc<Cell<Option<Stretch>>> = Rc::new(Cell::new(None));
     let stretch = StoredValue::new_local(stretch);
 
     let start_resize = move |event: PointerEvent| {
@@ -331,8 +374,8 @@ fn Window(
             let (width, height) = window_size_of(scene, id);
             stretch.with_value(|stretch| {
                 stretch.set(Some((
-                    f64::from(event.client_x()),
-                    f64::from(event.client_y()),
+                    event.client_x(),
+                    event.client_y(),
                     width,
                     height,
                 )));
@@ -340,12 +383,7 @@ fn Window(
         });
         // The grip keeps receiving moves once the pointer leaves it, which for a
         // grip a few pixels wide is immediately.
-        if let Some(target) = event
-            .target()
-            .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
-        {
-            let _ = target.set_pointer_capture(event.pointer_id());
-        }
+        capture(&event);
     };
     let do_resize = move |event: PointerEvent| {
         let Some((from_x, from_y, width, height)) = stretch.with_value(|stretch| stretch.get()) else {
@@ -353,8 +391,8 @@ fn Window(
         };
         // The grip moves in CSS pixels; surfaces are measured in device pixels.
         let ratio = crate::scene::pixel_ratio();
-        let dx = (f64::from(event.client_x()) - from_x) * ratio;
-        let dy = (f64::from(event.client_y()) - from_y) * ratio;
+        let dx = (event.client_x() - from_x) * ratio;
+        let dy = (event.client_y() - from_y) * ratio;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let (width, height) = (
             (f64::from(width) + dx).max(MIN_SURFACE) as u32,
@@ -396,6 +434,7 @@ fn Window(
         send(&ClientMessage::Focus { id: SurfaceId(id) });
     };
 
+    let current = scene.with_value(|scene| scene.workspace);
     let frame_ref: NodeRef<Div> = NodeRef::new();
     // Read through the signal rather than the prop. `<For>` is keyed by id, so a
     // window whose title or position changes is not rebuilt — the prop is a
@@ -413,8 +452,19 @@ fn Window(
             let ratio = crate::scene::pixel_ratio();
             // Hidden with `display`, never unmounted: tearing the row down would
             // take the canvas with it and leave the renderer drawing into a
-            // detached one, which succeeds and shows nothing ever after.
-            let hidden = if w.minimized { "display:none;" } else { "" };
+            // detached one, which succeeds and shows nothing ever after. Another
+            // workspace hides a window exactly as minimizing does, and for the
+            // same reason.
+            //
+            // ponytail: a hidden window goes on streaming, and off-screen
+            // surfaces are the encode cost the roadmap's risk table flags. Tell
+            // the compositor to stop sending them if window count starts to hurt.
+            let elsewhere = w.workspace != current.get();
+            let hidden = if w.minimized || elsewhere {
+                "display:none;"
+            } else {
+                ""
+            };
             format!(
                 "left:{}px; top:{}px; z-index:{}; width:{}px; {hidden}",
                 w.x,
@@ -466,6 +516,33 @@ fn window_size_of(scene: &Scene, id: u64) -> (u32, u32) {
         .windows
         .with_untracked(|ws| ws.iter().find(|w| w.id == id).map(|w| (w.width, w.height)))
         .unwrap_or((1, 1))
+}
+
+/// Give the element a gesture started on the rest of that gesture, wherever the
+/// pointer goes.
+fn capture(event: &PointerEvent) {
+    if let Some(target) = event
+        .target()
+        .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+    {
+        let _ = target.set_pointer_capture(event.pointer_id());
+    }
+}
+
+/// The workspace button under a pointer, if the gesture ended on one.
+///
+/// Read from the DOM rather than tracked, because the panel is the only thing
+/// that knows where its own buttons are, and it draws them from a stylesheet.
+fn workspace_under(event: &PointerEvent) -> Option<u32> {
+    let document = web_sys::window()?.document()?;
+    document
+        .element_from_point(event.client_x() as f32, event.client_y() as f32)?
+        .closest("[data-workspace]")
+        .ok()
+        .flatten()?
+        .get_attribute("data-workspace")?
+        .parse()
+        .ok()
 }
 
 /// A window's current top-left corner, for drag arithmetic.

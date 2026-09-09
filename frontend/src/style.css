@@ -23,6 +23,14 @@ body {
   overflow: hidden;
   /* Windows are absolutely positioned against this, so their coordinates are
      the page's and drag arithmetic needs no scroll correction. */
+
+  /* A background, not a wallpaper: two gradients cost no bytes, need no file to
+     ship or path to configure, and give the window shadows something to sit
+     against so the desktop reads as having depth. */
+  background:
+    radial-gradient(70rem 40rem at 18% -10%, #1d2333 0%, transparent 60%),
+    radial-gradient(60rem 40rem at 100% 100%, #221d2e 0%, transparent 55%),
+    #0d0d11;
 }
 
 .window {
@@ -123,6 +131,35 @@ body {
   z-index: 2147483000;
   background: #14141b;
   border-top: 1px solid #262630;
+}
+
+#webland-panel .workspaces {
+  display: flex;
+  gap: 0.25rem;
+}
+
+#webland-panel .workspace {
+  width: 24px;
+  height: 24px;
+  border: 1px solid #2f2f3a;
+  border-radius: 0.25rem;
+  background: #1b1b23;
+  color: #7a7a88;
+  font: 600 0.75rem/1 system-ui, sans-serif;
+  cursor: pointer;
+}
+
+#webland-panel .workspace:hover {
+  border-color: #454556;
+  color: #c8c8d0;
+}
+
+/* The one you are on. Without this the switcher is four identical buttons and
+   you cannot tell where you are. */
+#webland-panel .workspace.here {
+  background: #33334a;
+  border-color: #4d4d6b;
+  color: #fff;
 }
 
 #webland-panel .launch {

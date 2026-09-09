@@ -48,6 +48,10 @@ pub struct WindowState {
     /// Hidden, but still open and still streaming. The panel is how it comes
     /// back, which is why a minimized window keeps its task button.
     pub minimized: bool,
+    /// Which workspace the window sits on. Browser state like position and
+    /// stacking: switching workspaces shows and hides windows and tells the
+    /// compositor nothing.
+    pub workspace: u32,
     /// Where the window sat before it was maximized — so `Some` is what it
     /// means to be maximized, and there is no way to be maximized with nowhere
     /// to go back to.
@@ -68,6 +72,8 @@ pub struct Scene {
     pub windows: RwSignal<Vec<WindowState>>,
     /// What the launcher may start, as the compositor reported it.
     pub applications: RwSignal<Vec<Application>>,
+    /// The workspace on screen. Windows on any other one are hidden.
+    pub workspace: RwSignal<u32>,
     views: Rc<RefCell<HashMap<u64, View>>>,
     /// The latest frame for a surface whose canvas Leptos has not mounted yet.
     ///
@@ -87,6 +93,7 @@ impl Scene {
         Self {
             windows: RwSignal::new(Vec::new()),
             applications: RwSignal::new(Vec::new()),
+            workspace: RwSignal::new(0),
             views: Rc::new(RefCell::new(HashMap::new())),
             pending: Rc::new(RefCell::new(HashMap::new())),
             latency,
@@ -133,6 +140,10 @@ impl Scene {
                         y: 40 + offset,
                         z: 0,
                         minimized: false,
+                        // Where the user is looking. Launching something from
+                        // workspace 3 and having it open on 1 is the behaviour
+                        // nobody wants.
+                        workspace: self.workspace.get_untracked(),
                         restore: None,
                     });
                 });
@@ -276,6 +287,22 @@ impl Scene {
                 _ => {}
             }
         });
+    }
+
+    /// Send a window to another workspace, and follow it there.
+    ///
+    /// Following matters: a window that vanishes because it was dropped
+    /// somewhere the user is not looking reads as having been closed.
+    pub fn send_to_workspace(&self, id: u64, workspace: u32) {
+        self.windows.update(|ws| {
+            if let Some(window) = ws.iter_mut().find(|w| w.id == id) {
+                window.workspace = workspace;
+                // A window arriving somewhere hidden is not what "send this
+                // there" means.
+                window.minimized = false;
+            }
+        });
+        self.workspace.set(workspace);
     }
 
     /// Set a window's box while a resize grip is being dragged.
