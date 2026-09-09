@@ -134,6 +134,11 @@ configure costs the client a reallocation and the wire a keyframe, so the last
 frame is stretched for the length of the gesture and sharpens when the client
 answers.
 
+The chrome is the only chrome: the compositor implements `xdg-decoration` and
+answers every client `ServerSide`, so a client that would otherwise draw its own
+titlebar does not put a second one, with a second set of buttons, inside the one
+the shell drew.
+
 Workspaces are the clearest case of the architecture paying off: the browser
 already holds every window, so a workspace is a filter over state it has, and
 switching sends nothing at all. Four of them, in the panel; drag a window onto

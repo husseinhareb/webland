@@ -63,6 +63,7 @@ use smithay::backend::winit::{self, WinitEvent};
 use smithay::input::keyboard::{FilterResult, KeyboardHandle, XkbConfig};
 use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent, PointerHandle};
 use smithay::input::{Seat, SeatHandler, SeatState};
+use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::backend::{
     ClientData, ClientId, DisconnectReason, ObjectId,
@@ -89,10 +90,13 @@ use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface, XdgShellHandler,
     XdgShellState,
 };
+use smithay::wayland::shell::xdg::decoration::{
+    XdgDecorationHandler, XdgDecorationState,
+};
 use smithay::wayland::shm::{ShmHandler, ShmState, with_buffer_contents};
 use smithay::{
     delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_seat, delegate_shm,
-    delegate_xdg_shell,
+    delegate_xdg_decoration, delegate_xdg_shell,
 };
 
 /// Compositor state. Holds the protocol globals and the seat; owns everything a
@@ -166,6 +170,37 @@ impl XdgShellHandler for Webland {
         _positioner: PositionerState,
         _token: u32,
     ) {
+    }
+}
+
+/// Webland draws every window's chrome itself, in the browser (see
+/// `frontend/src/desktop`), so clients must not draw their own: a client that
+/// falls back to client-side decorations puts a second titlebar, with a second
+/// set of buttons, inside the one the shell already drew.
+///
+/// A preference is all a client gets to express here. The mode is the
+/// compositor's to choose, and this one has only one answer.
+impl XdgDecorationHandler for Webland {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        Self::decorate_server_side(&toplevel);
+    }
+
+    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: DecorationMode) {
+        Self::decorate_server_side(&toplevel);
+    }
+
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        Self::decorate_server_side(&toplevel);
+    }
+}
+
+impl Webland {
+    /// Tell a toplevel the compositor is drawing its decorations.
+    fn decorate_server_side(toplevel: &ToplevelSurface) {
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+        });
+        toplevel.send_configure();
     }
 }
 
@@ -1292,6 +1327,10 @@ pub fn run_winit(
     // Phase 1 renders through winit's own GL context; no dmabuf global here.
     let dmabuf_state = DmabufState::new();
     let xdg_shell_state = XdgShellState::new::<Webland>(&dh);
+    // The global is registered on the display, not held by the returned value,
+    // and nothing here reads it back — it exists so clients can ask, and are
+    // told the shell decorates.
+    let _decoration = XdgDecorationState::new::<Webland>(&dh);
     let data_device_state = DataDeviceState::new::<Webland>(&dh);
     let mut seat_state = SeatState::new();
     let seat = seat_state.new_wl_seat(&dh, "winit");
@@ -1494,6 +1533,10 @@ pub fn run_headless(
     }
     let mut renderer = gpu.map(|(renderer, _)| renderer);
     let xdg_shell_state = XdgShellState::new::<Webland>(&dh);
+    // The global is registered on the display, not held by the returned value,
+    // and nothing here reads it back — it exists so clients can ask, and are
+    // told the shell decorates.
+    let _decoration = XdgDecorationState::new::<Webland>(&dh);
     let data_device_state = DataDeviceState::new::<Webland>(&dh);
     let mut seat_state = SeatState::new();
     let seat = seat_state.new_wl_seat(&dh, "webland");
@@ -1591,6 +1634,7 @@ pub fn run_headless(
 
 delegate_compositor!(Webland);
 delegate_xdg_shell!(Webland);
+delegate_xdg_decoration!(Webland);
 delegate_shm!(Webland);
 delegate_dmabuf!(Webland);
 delegate_seat!(Webland);
