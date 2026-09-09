@@ -52,6 +52,11 @@ const WORKSPACES: u32 = 4;
 /// accumulate over a long drag.
 type Stretch = (f64, f64, u32, u32);
 
+/// Where a move began: the pointer's offset into the titlebar, and the corner
+/// the window started from — kept so a drag that ends on a workspace button can
+/// put the window back rather than leave it parked over the panel.
+type Grab = (f64, f64, i32, i32);
+
 /// The smallest a window may be dragged, in device pixels. Small enough to be
 /// no real limit, large enough that a window can never lose its own grip.
 const MIN_SURFACE: f64 = 160.0;
@@ -317,7 +322,7 @@ fn Window(
 
     // Dragging by the title bar. Held here rather than in the scene because it
     // is per-window and lasts exactly as long as the gesture.
-    let grab: Rc<Cell<Option<(f64, f64)>>> = Rc::new(Cell::new(None));
+    let grab: Rc<Cell<Option<Grab>>> = Rc::new(Cell::new(None));
 
     let grab = StoredValue::new_local(grab);
 
@@ -329,6 +334,8 @@ fn Window(
                 grab.set(Some((
                     event.client_x() - f64::from(x),
                     event.client_y() - f64::from(y),
+                    x,
+                    y,
                 )));
             });
         });
@@ -339,7 +346,7 @@ fn Window(
     };
     let do_drag = move |event: PointerEvent| {
         let held = grab.with_value(|grab| grab.get());
-        if let Some((dx, dy)) = held {
+        if let Some((dx, dy, _, _)) = held {
             #[allow(clippy::cast_possible_truncation)]
             scene.with_value(|scene| {
                 scene.move_to(
@@ -355,11 +362,18 @@ fn Window(
     // and dragging a window onto a workspace is the idiom every desktop uses,
     // so it needs no affordance of its own.
     let end_drag = move |event: PointerEvent| {
-        if grab.with_value(|grab| grab.take()).is_none() {
+        let Some((_, _, from_x, from_y)) = grab.with_value(|grab| grab.take()) else {
             return;
-        }
+        };
         if let Some(workspace) = workspace_under(&event) {
-            scene.with_value(|scene| scene.send_to_workspace(id, workspace));
+            scene.with_value(|scene| {
+                // Back where it started. The drag was a gesture aimed at the
+                // panel, not at a new position — dropping it where the pointer
+                // happened to be leaves the window parked over the panel, mostly
+                // off-screen, on a workspace the user is about to be shown.
+                scene.move_to(id, from_x, from_y);
+                scene.send_to_workspace(id, workspace);
+            });
         }
     };
 
