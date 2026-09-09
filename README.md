@@ -1,18 +1,23 @@
 # Webland
 
-Webland is an experimental Wayland-based Linux desktop environment whose
-graphical display is presented through a web browser.
+A Wayland compositor that uses a browser as its display, streaming each window
+separately so the browser does the compositing.
 
-Linux applications talk Wayland to a Rust backend, which forwards surfaces and
-input over the Webland protocol to a browser frontend that draws the desktop
-with WebGPU. The frontend is written in Rust with Leptos and compiled to
-WebAssembly, so it shares the protocol crate with the backend.
+Linux applications talk Wayland to a Rust backend, which encodes each surface to
+H.264 on the GPU and sends it over the Webland protocol to a browser frontend
+that decodes it with WebCodecs and draws it on a 2D canvas, one canvas per
+window. The frontend is written in Rust with Leptos and compiled to WebAssembly,
+so it shares the protocol crate with the backend.
 
-**Status: architectural / prototyping stage.** The repository currently holds
-the workspace layout, dependencies and tooling only the compositor, the
-protocol and the shell are not implemented. See
-[docs/roadmap.md](docs/roadmap.md) for the order of work and what has to be
-proven before the desktop gets built.
+Streaming per surface rather than per screen is what makes the shell cheap: the
+browser already holds every window, so moving, stacking and minimizing one are
+local and send nothing at all.
+
+**Status: the desktop runs.** Zero-copy dmabuf to VA-API to WebCodecs, a
+browser-driven frame clock, and a shell with window chrome, a panel and a
+launcher. Workspaces, notifications, menus and settings do not exist yet, and
+the protocol is unauthenticated. See [docs/roadmap.md](docs/roadmap.md) for the
+order of work.
 
 ## Layout
 
@@ -48,10 +53,9 @@ cd frontend && trunk serve
 ./scripts/dev.sh
 ```
 
-The backend currently runs the **Phase 1** compositor: a winit-backed Wayland
-compositor that renders mapped surfaces into a window on your existing desktop
-(no browser yet). It binds its own `wayland-N` socket and logs the name. Point a
-client at it, or have it spawn one:
+The compositor binds its own `wayland-N` socket and logs the name. Without
+`WEBLAND_HEADLESS` it also opens a winit window on your existing desktop, which
+is useful as a visual ground truth. Point a client at it, or have it spawn one:
 
 ```sh
 # spawn a client automatically (any Wayland app)
@@ -65,9 +69,12 @@ WAYLAND_DISPLAY=wayland-2 weston-terminal
 ### Phase 2/3: surfaces into the browser, and input back
 
 Surfaces are encoded to H.264 on the GPU and streamed over a WebSocket; the
-browser decodes them with WebCodecs and draws the result with WebGPU (2D canvas
-where WebGPU is off), and sends pointer/keyboard input back. Frames are paced by
-the browser, so clients redraw at its rate rather than into a growing queue.
+browser decodes them with WebCodecs and draws the result on a 2D canvas, and
+sends pointer, keyboard and wheel input back. Frames are paced by the browser,
+so clients redraw at its rate rather than into a growing queue.
+
+(There is a `wgpu` renderer in `frontend/src/gpu`, but nothing constructs it —
+it is parked until the WebGPU path is worth switching on.)
 
 A client that hands over a dmabuf never has its pixels copied: the buffer is
 imported as `DRM_PRIME`, mapped to a VA-API surface and encoded from the memory
@@ -113,6 +120,36 @@ scrolling terminal cost ~47 Mbit/s as deflated damage rectangles.
 Click-to-photon is measured in the browser and shown above the surface, since
 both ends of it — the input and the frame it causes — happen there, so the page
 clock is already the shared one. Typing currently lands around **52 ms median**.
+
+### The shell
+
+Window chrome, stacking, the panel and the launcher are drawn by the browser in
+HTML and CSS, so they cost the compositor nothing. Dragging, raising and
+minimizing a window cost no pixels at all. Raising one sends a few bytes, and
+only because there is a single seat and the compositor has to know who is
+holding it. Maximizing is the one gesture the client itself must act on: it is
+told to redraw at the new size rather than be stretched up from a smaller one.
+
+The launcher lists what it finds in `.desktop` files, with their icons. An
+application that will not start from a generic `Exec` line — anything that hands
+off to a copy already running as the same user, such as Firefox — can be given a
+different command in `~/.config/webland/launch.conf`:
+
+```
+Firefox  = firefox --new-instance
+Chromium = chromium --user-data-dir=~/.webland/chromium
+```
+
+### Reaching it from another machine
+
+The page derives its WebSocket URL from wherever it is served, so any reverse
+proxy that forwards one port will do. It must be **HTTPS**: `VideoDecoder` is a
+secure-context API, and over plain `http` to anything but localhost it is
+`undefined` and every window stays black. On a tailnet:
+
+```sh
+sudo tailscale serve --bg --https=443 http://127.0.0.1:7681
+```
 
 Linux-first and Wayland-first. Xorg is not a target; X11 applications would be
 handled through XWayland later, if at all.
