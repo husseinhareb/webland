@@ -111,10 +111,16 @@ impl Applications {
         let Some(program) = parts.next() else {
             return;
         };
-        match std::process::Command::new(program)
-            .args(parts)
-            .env("WAYLAND_DISPLAY", display)
-            .spawn()
+        // Started from the user's home, not from wherever webland was launched:
+        // a child inherits the compositor's working directory, so every file
+        // dialog in every application would open in the source tree.
+        let home = home();
+        let mut launcher = std::process::Command::new(program);
+        launcher.args(parts).env("WAYLAND_DISPLAY", display);
+        if !home.is_empty() {
+            launcher.current_dir(&home);
+        }
+        match launcher.spawn()
         {
             Ok(_) => tracing::info!(%command, "launched"),
             Err(err) => tracing::warn!(%command, %err, "could not launch"),
