@@ -91,6 +91,9 @@ pub struct Scene {
     pub applications: RwSignal<Vec<Application>>,
     /// The workspace on screen. Windows on any other one are hidden.
     pub workspace: RwSignal<u32>,
+    /// The pointer's look over a client's surface, as a CSS cursor keyword —
+    /// the shell's own chrome keeps the cursors its stylesheet gives it.
+    pub cursor: RwSignal<String>,
     /// A gesture a client made on its own titlebar, waiting for the window it
     /// names to act on it. One at a time: a pointer makes one gesture, and the
     /// window that takes it clears this.
@@ -119,6 +122,7 @@ impl Scene {
             windows: RwSignal::new(Vec::new()),
             applications: RwSignal::new(Vec::new()),
             workspace: RwSignal::new(0),
+            cursor: RwSignal::new(String::from("default")),
             requests: RwSignal::new(None),
             dragging: RwSignal::new(None),
             views: Rc::new(RefCell::new(HashMap::new())),
@@ -215,6 +219,7 @@ impl Scene {
                 };
                 self.paint(view, frame);
             }
+            ServerMessage::Cursor { name } => self.cursor.set(name),
             ServerMessage::SurfaceRequest { id, request } => {
                 self.requests.set(Some((id.0, request)));
             }

@@ -62,7 +62,7 @@ use smithay::backend::renderer::{
 };
 use smithay::backend::winit::{self, WinitEvent};
 use smithay::input::keyboard::{FilterResult, KeyboardHandle, XkbConfig};
-use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent, PointerHandle};
+use smithay::input::pointer::{AxisFrame, ButtonEvent, CursorImageStatus, MotionEvent, PointerHandle};
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
@@ -94,10 +94,11 @@ use smithay::wayland::shell::xdg::{
 use smithay::wayland::shell::xdg::decoration::{
     XdgDecorationHandler, XdgDecorationState,
 };
+use smithay::wayland::cursor_shape::CursorShapeManagerState;
 use smithay::wayland::shm::{ShmHandler, ShmState, with_buffer_contents};
 use smithay::{
     delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_seat, delegate_shm,
-    delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_cursor_shape, delegate_xdg_decoration, delegate_xdg_shell,
 };
 
 /// Compositor state. Holds the protocol globals and the seat; owns everything a
@@ -129,6 +130,10 @@ pub struct Webland {
     /// Open popups — menus, tooltips, combobox lists — oldest first, so a
     /// submenu always follows the menu it came from.
     popups: Vec<PopupSurface>,
+    /// What the pointer currently looks like, as a CSS cursor keyword.
+    cursor: String,
+    /// Tell the browser about the cursor on the next pass.
+    announce_cursor: bool,
 }
 
 impl BufferHandler for Webland {
@@ -332,13 +337,37 @@ impl SeatHandler for Webland {
 
     fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
 
+    /// The client under the pointer has said what the pointer should look like.
+    ///
+    /// Named shapes only, which is what `wp_cursor_shape_manager_v1` gets from a
+    /// client and what a browser can draw without being sent a picture: the
+    /// names are CSS's names.
+    ///
+    /// ponytail: a client that sets a cursor surface instead — an older toolkit,
+    /// or one drawing a custom cursor — gets the arrow. Streaming that surface
+    /// is another window's worth of machinery for a 24-pixel image; do it if a
+    /// real application turns out to need it.
     fn cursor_image(
         &mut self,
         _seat: &Seat<Self>,
-        _image: smithay::input::pointer::CursorImageStatus,
+        image: CursorImageStatus,
     ) {
+        let name = match image {
+            CursorImageStatus::Hidden => "none",
+            CursorImageStatus::Named(icon) => icon.name(),
+            CursorImageStatus::Surface(_) => "default",
+        };
+        if self.cursor != name {
+            self.cursor = name.to_string();
+            self.announce_cursor = true;
+        }
     }
 }
+
+/// Cursor shapes cover tablet tools as well as pointers, and the protocol's
+/// delegate asks for both. There is no tablet here — the browser has a mouse —
+/// so the defaults, which do nothing, are the whole implementation.
+impl smithay::wayland::tablet_manager::TabletSeatHandler for Webland {}
 
 impl SelectionHandler for Webland {
     type SelectionUserData = ();
@@ -1154,6 +1183,9 @@ fn drain_client(
                 // "Send me everything" includes what the launcher can start: a
                 // browser that just connected has no list yet.
                 state.announce_applications = true;
+                // And what the pointer looks like: the browser's own default is
+                // an arrow, whatever the client last asked for.
+                state.announce_cursor = true;
             }
             ClientMessage::Focus { id } => {
                 state.focus = Some(id);
@@ -1311,6 +1343,11 @@ fn stream_dirty(
     let keyframe = std::mem::take(&mut state.keyframe);
     if std::mem::take(&mut state.announce_applications) {
         emit(ServerMessage::Applications(applications.listing()));
+    }
+    if std::mem::take(&mut state.announce_cursor) {
+        emit(ServerMessage::Cursor {
+            name: state.cursor.clone(),
+        });
     }
     // A request names a surface the browser has never heard of until that
     // surface has been announced; one arriving that early is dropped rather than
@@ -1613,6 +1650,11 @@ pub fn run_winit(
     // and nothing here reads it back — it exists so clients can ask, and are
     // told the shell decorates.
     let _decoration = XdgDecorationState::new::<Webland>(&dh);
+    // Cursor shapes by name. Without this global a client has no way to ask for
+    // one, and falls back to committing a themed image as a surface — which is
+    // a picture the browser is never sent, so every application would be stuck
+    // with the arrow the browser draws.
+    let _cursor_shape = CursorShapeManagerState::new::<Webland>(&dh);
     let data_device_state = DataDeviceState::new::<Webland>(&dh);
     let mut seat_state = SeatState::new();
     let seat = seat_state.new_wl_seat(&dh, "winit");
@@ -1632,6 +1674,8 @@ pub fn run_winit(
         server_decorated: HashSet::new(),
         requests: Vec::new(),
         popups: Vec::new(),
+        cursor: String::from("default"),
+        announce_cursor: false,
     };
 
     let keyboard = state
@@ -1828,6 +1872,11 @@ pub fn run_headless(
     // and nothing here reads it back — it exists so clients can ask, and are
     // told the shell decorates.
     let _decoration = XdgDecorationState::new::<Webland>(&dh);
+    // Cursor shapes by name. Without this global a client has no way to ask for
+    // one, and falls back to committing a themed image as a surface — which is
+    // a picture the browser is never sent, so every application would be stuck
+    // with the arrow the browser draws.
+    let _cursor_shape = CursorShapeManagerState::new::<Webland>(&dh);
     let data_device_state = DataDeviceState::new::<Webland>(&dh);
     let mut seat_state = SeatState::new();
     let seat = seat_state.new_wl_seat(&dh, "webland");
@@ -1847,6 +1896,8 @@ pub fn run_headless(
         server_decorated: HashSet::new(),
         requests: Vec::new(),
         popups: Vec::new(),
+        cursor: String::from("default"),
+        announce_cursor: false,
     };
 
     let keyboard = state
@@ -1935,6 +1986,7 @@ pub fn run_headless(
 delegate_compositor!(Webland);
 delegate_xdg_shell!(Webland);
 delegate_xdg_decoration!(Webland);
+delegate_cursor_shape!(Webland);
 delegate_shm!(Webland);
 delegate_dmabuf!(Webland);
 delegate_seat!(Webland);

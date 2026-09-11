@@ -624,13 +624,18 @@ fn Window(
             )
         })
     };
+    let cursor = scene.with_value(|scene| scene.cursor);
     let canvas_style = move || {
         state().map_or_else(String::new, |w| {
             let ratio = crate::scene::pixel_ratio();
             let (sx, sy) = scale();
             let (image_w, image_h) = w.image;
+            // The cursor rides on the canvas rather than the desktop, so it is
+            // the client's over a client's pixels and the shell's everywhere
+            // else — the titlebar's grab hand, the grip's arrows.
             format!(
-                "width:{}px; height:{}px; left:{}px; top:{}px;",
+                "cursor:{}; width:{}px; height:{}px; left:{}px; top:{}px;",
+                cursor.get(),
                 f64::from(image_w) * sx / ratio,
                 f64::from(image_h) * sy / ratio,
                 -f64::from(w.content.x) * sx / ratio,

@@ -82,6 +82,7 @@ impl SurfaceRenderer {
             ServerMessage::SurfaceDestroyed { .. }
             | ServerMessage::SurfaceTitle { .. }
             | ServerMessage::SurfaceRequest { .. }
+            | ServerMessage::Cursor { .. }
             | ServerMessage::Applications(_) => {}
         }
     }

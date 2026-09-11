@@ -143,6 +143,12 @@ treatment: the shell leaves its own titlebar off and forwards their move,
 maximize and minimize requests to the browser, so the client's own bar drives
 the same window management the shell's would have.
 
+The pointer is the client's to name: `wp_cursor_shape_manager_v1` gets a shape
+by name, and the names it uses are CSS's names, so what the client asked for
+goes straight onto the canvas — an I-beam over text, a hand over a link, nothing
+at all where a client hides it. Only over client pixels: the shell's chrome
+keeps the cursors its stylesheet gives it.
+
 Menus, tooltips and combobox lists are popups: surfaces the client places
 itself, against the window that opened it. They stream down the same path a
 window does, and the browser hangs each one off its parent, so dragging a window

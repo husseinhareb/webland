@@ -202,6 +202,18 @@ pub enum ServerMessage {
         id: SurfaceId,
         request: WindowRequest,
     },
+    /// What the pointer should look like over a client's surface.
+    ///
+    /// The name is a CSS cursor keyword, which is also the XDG cursor name the
+    /// client asked for — the two vocabularies are the same one, so the browser
+    /// can hand it straight to the stylesheet. `none` hides the pointer, which
+    /// is what a client that draws its own does.
+    ///
+    /// Sent for the seat, not per surface: there is one pointer, and only the
+    /// surface it is over has any say in how it looks.
+    Cursor {
+        name: String,
+    },
     /// The surface is gone; the browser should drop its scene node.
     ///
     /// Without this a closed window stays on screen forever: the browser has no
