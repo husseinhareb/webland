@@ -16,6 +16,9 @@ pub struct Applications {
     /// Ordered for display; the index is the id the browser sends back.
     names: Vec<Application>,
     commands: HashMap<u32, String>,
+    /// The `.desktop` files this listing was built from, so
+    /// [`Applications::refresh`] can tell that one has come or gone.
+    sources: Vec<PathBuf>,
 }
 
 impl Applications {
@@ -23,17 +26,14 @@ impl Applications {
     #[must_use]
     pub fn scan() -> Self {
         let mut found: Vec<(String, String, Option<String>)> = Vec::new();
-        let home = std::env::var("HOME").unwrap_or_default();
-        let dirs = [
-            format!("{home}/.local/share/applications"),
-            String::from("/usr/share/applications"),
-        ];
+        let home = home();
+        let dirs = dirs(&home);
         let overrides = overrides(&home);
         if !overrides.is_empty() {
             tracing::info!(count = overrides.len(), "launch command overrides");
         }
-        for dir in dirs {
-            let Ok(entries) = std::fs::read_dir(&dir) else {
+        for dir in &dirs {
+            let Ok(entries) = std::fs::read_dir(dir) else {
                 continue;
             };
             for entry in entries.flatten() {
@@ -61,7 +61,35 @@ impl Applications {
             });
             commands.insert(id, exec);
         }
-        Self { names, commands }
+        Self {
+            names,
+            commands,
+            sources: sources(&dirs),
+        }
+    }
+
+    /// Re-scan when an application has been installed or removed.
+    ///
+    /// Listing the directories is two `readdir` calls against names the kernel
+    /// already has cached, which is cheap enough to do every pass — unlike the
+    /// scan itself, which opens every file and base64s every icon. Returns
+    /// whether the listing changed, and so wants announcing to the browser.
+    ///
+    /// Names rather than the directories' modification times: those are only as
+    /// fine as a timer tick, so a removal in the same tick as the last look
+    /// would leave a dead entry in the launcher for the rest of the session.
+    ///
+    /// ponytail: an edit to a file already there is still missed, since its name
+    /// did not change. Installing and removing is what a launcher goes stale
+    /// over; stat the files too if editing one in place ever matters.
+    pub fn refresh(&mut self) -> bool {
+        if sources(&dirs(&home())) == self.sources {
+            return false;
+        }
+        let fresh = Self::scan();
+        let changed = fresh.names != self.names;
+        *self = fresh;
+        changed
     }
 
     /// The list to show, in display order.
@@ -92,6 +120,31 @@ impl Applications {
             Err(err) => tracing::warn!(%command, %err, "could not launch"),
         }
     }
+}
+
+fn home() -> String {
+    std::env::var("HOME").unwrap_or_default()
+}
+
+/// The directories holding `.desktop` files, the user's own first.
+fn dirs(home: &str) -> [String; 2] {
+    [
+        format!("{home}/.local/share/applications"),
+        String::from("/usr/share/applications"),
+    ]
+}
+
+/// Every `.desktop` file in the given directories, in a stable order.
+fn sources(dirs: &[String]) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = dirs
+        .iter()
+        .flat_map(|dir| std::fs::read_dir(dir).into_iter().flatten().flatten())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "desktop"))
+        .collect();
+    // `readdir` order is the filesystem's, and need not repeat between calls.
+    paths.sort_unstable();
+    paths
 }
 
 /// The user's launch overrides, read from `$XDG_CONFIG_HOME/webland/launch.conf`.
@@ -309,7 +362,31 @@ fn strip_field_codes(exec: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{base64, icon_path, parse_overrides, strip_field_codes};
+    use super::{base64, icon_path, parse_overrides, sources, strip_field_codes};
+
+    #[test]
+    fn removing_an_entry_changes_what_a_directory_holds() {
+        // What a refresh rests on: an application going away is visible from the
+        // directory listing alone, without opening anything in it.
+        let dir = std::env::temp_dir().join(format!("webland-apps-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("gone.desktop");
+        std::fs::write(&entry, "[Desktop Entry]\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "not an application").unwrap();
+
+        let dirs = [
+            dir.to_string_lossy().into_owned(),
+            format!("{}/absent", dir.display()),
+        ];
+        // A directory that is not there contributes nothing, rather than failing.
+        let before = sources(&dirs);
+        assert_eq!(before, vec![entry.clone()]);
+
+        std::fs::remove_file(&entry).unwrap();
+        assert!(sources(&dirs).is_empty());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn field_codes_are_dropped_but_arguments_are_not() {

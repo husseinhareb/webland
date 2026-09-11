@@ -1378,10 +1378,10 @@ pub fn run_winit(
     }
 
     let (mut backend, mut winit) = winit::init::<GlesRenderer>()?;
-    // Scanned once: .desktop files do not change while a session runs, and a
-    // launcher that re-reads a hundred files on every click would be paying for
-    // nothing.
-    let applications = apps::Applications::scan();
+    // Scanned now and re-scanned only when a directory changes: installing or
+    // removing an application while the session runs has to reach the launcher,
+    // but re-reading a hundred files every pass would be paying for nothing.
+    let mut applications = apps::Applications::scan();
     tracing::info!(
         count = applications.listing().len(),
         "applications available"
@@ -1416,6 +1416,12 @@ pub fn run_winit(
 
         if let PumpStatus::Exit(_) = status {
             return Ok(());
+        }
+
+        // An application installed or removed since the last pass: the browser
+        // holds the listing, so it has to be told the new one.
+        if applications.refresh() {
+            state.announce_applications = true;
         }
 
         drain_client(
@@ -1583,10 +1589,10 @@ pub fn run_headless(
         }
     }
 
-    // Scanned once: .desktop files do not change while a session runs, and a
-    // launcher that re-reads a hundred files on every click would be paying for
-    // nothing.
-    let applications = apps::Applications::scan();
+    // Scanned now and re-scanned only when a directory changes: installing or
+    // removing an application while the session runs has to reach the launcher,
+    // but re-reading a hundred files every pass would be paying for nothing.
+    let mut applications = apps::Applications::scan();
     tracing::info!(
         count = applications.listing().len(),
         "applications available"
@@ -1604,6 +1610,12 @@ pub fn run_headless(
             clients.push(client);
         }
         display.dispatch_clients(&mut state)?;
+
+        // An application installed or removed since the last pass: the browser
+        // holds the listing, so it has to be told the new one.
+        if applications.refresh() {
+            state.announce_applications = true;
+        }
 
         drain_client(
             &mut state,
