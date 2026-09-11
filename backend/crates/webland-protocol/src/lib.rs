@@ -95,6 +95,35 @@ pub struct Application {
 pub struct SurfaceCreated {
     pub id: SurfaceId,
     pub size: Size,
+    /// The window itself within that image, in the same pixels.
+    ///
+    /// A client that draws its own shadow commits a buffer bigger than its
+    /// window and says so in its geometry; the margin is transparent to the
+    /// client and black once encoded, so the browser is told what to show and
+    /// clips the rest away.
+    pub content: Rect,
+    /// Whether the shell should draw this window's chrome.
+    ///
+    /// False for a client that decorates itself — a GTK application, whose
+    /// headerbar is part of the window it drew. Such a client never asks for a
+    /// decoration mode, because it does not implement the protocol that would
+    /// let the compositor answer, so the shell drawing a titlebar of its own
+    /// would put a second one directly above the client's.
+    pub decorated: bool,
+}
+
+/// A window-management gesture that began inside the client, not the shell.
+///
+/// A self-decorating client's own titlebar is where these come from: dragging it
+/// is `Move`, double-clicking it is `Maximize`, and its buttons are the rest.
+/// The shell owns window position and stacking, so the client can only ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WindowRequest {
+    /// Follow the pointer until the button comes up, as a titlebar drag does.
+    Move,
+    Maximize,
+    Unmaximize,
+    Minimize,
 }
 
 /// New contents for a surface.
@@ -145,6 +174,16 @@ pub enum ServerMessage {
     SurfaceTitle {
         id: SurfaceId,
         title: String,
+    },
+    /// The surface's client asked the shell to move, maximize or minimize it.
+    ///
+    /// Only self-decorating clients send these, and only because their own
+    /// titlebar is the one the user grabbed. A client that lets the compositor
+    /// decorate never asks: the shell's own chrome is already the one being
+    /// clicked, and it acts without a round trip.
+    SurfaceRequest {
+        id: SurfaceId,
+        request: WindowRequest,
     },
     /// The surface is gone; the browser should drop its scene node.
     ///
@@ -238,6 +277,13 @@ mod tests {
                 width: 800,
                 height: 600,
             },
+            content: Rect {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            },
+            decorated: true,
         });
         let frame = encode(&msg).unwrap();
         assert_eq!(msg, decode::<ServerMessage>(&frame).unwrap());

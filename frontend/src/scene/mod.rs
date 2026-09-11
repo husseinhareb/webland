@@ -17,7 +17,8 @@ use std::rc::Rc;
 use leptos::prelude::*;
 use web_sys::HtmlCanvasElement;
 use webland_core::SurfaceId;
-use webland_protocol::{Application, Codec, ServerMessage, SurfaceFrame};
+use webland_core::Rect;
+use webland_protocol::{Application, Codec, ServerMessage, SurfaceFrame, WindowRequest};
 
 use crate::compositor::{Renderer, SurfaceRenderer};
 use crate::decode::Decoder;
@@ -39,8 +40,16 @@ const CASCADE: i32 = 34;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WindowState {
     pub id: u64,
+    /// The window's box on screen, in device pixels. Starts as the client's own
+    /// window size and runs ahead of it for the length of a resize drag.
     pub width: u32,
     pub height: u32,
+    /// The streamed image's size, which is the canvas bitmap's size — bigger
+    /// than the window whenever the client drew a shadow around it.
+    pub image: (u32, u32),
+    /// Where the window sits inside that image. Everything outside it is the
+    /// client's own margin, which is black once encoded and so is clipped away.
+    pub content: Rect,
     pub title: String,
     pub x: i32,
     pub y: i32,
@@ -52,6 +61,9 @@ pub struct WindowState {
     /// stacking: switching workspaces shows and hides windows and tells the
     /// compositor nothing.
     pub workspace: u32,
+    /// Whether the shell draws this window's chrome. False for a client that
+    /// drew its own titlebar, where a second one would sit directly above it.
+    pub decorated: bool,
     /// Where the window sat before it was maximized — so `Some` is what it
     /// means to be maximized, and there is no way to be maximized with nowhere
     /// to go back to.
@@ -74,6 +86,14 @@ pub struct Scene {
     pub applications: RwSignal<Vec<Application>>,
     /// The workspace on screen. Windows on any other one are hidden.
     pub workspace: RwSignal<u32>,
+    /// A gesture a client made on its own titlebar, waiting for the window it
+    /// names to act on it. One at a time: a pointer makes one gesture, and the
+    /// window that takes it clears this.
+    pub requests: RwSignal<Option<(u64, WindowRequest)>>,
+    /// The window following the pointer because its client asked to be moved.
+    /// The shell's own titlebar drag does not use this — it has the pointer
+    /// events already, and this is for the case where the client has them.
+    pub dragging: RwSignal<Option<u64>>,
     views: Rc<RefCell<HashMap<u64, View>>>,
     /// The latest frame for a surface whose canvas Leptos has not mounted yet.
     ///
@@ -94,6 +114,8 @@ impl Scene {
             windows: RwSignal::new(Vec::new()),
             applications: RwSignal::new(Vec::new()),
             workspace: RwSignal::new(0),
+            requests: RwSignal::new(None),
+            dragging: RwSignal::new(None),
             views: Rc::new(RefCell::new(HashMap::new())),
             pending: Rc::new(RefCell::new(HashMap::new())),
             latency,
@@ -115,8 +137,14 @@ impl Scene {
                     // that always accompanies a resize.
                     self.windows.update(|ws| {
                         if let Some(window) = ws.iter_mut().find(|w| w.id == id) {
-                            window.width = width;
-                            window.height = height;
+                            window.image = (width, height);
+                            window.content = created.content;
+                            window.width = created.content.width;
+                            window.height = created.content.height;
+                            // Re-sent with every announce, and worth taking: a
+                            // client that bound the decoration protocol late
+                            // would otherwise keep the chrome it opened with.
+                            window.decorated = created.decorated;
                         }
                     });
                     if let Some(view) = self.views.borrow().get(&id)
@@ -133,13 +161,16 @@ impl Scene {
                 self.windows.update(|ws| {
                     ws.push(WindowState {
                         id,
-                        width,
-                        height,
+                        width: created.content.width,
+                        height: created.content.height,
+                        image: (width, height),
+                        content: created.content,
                         title: String::from("…"),
                         x: 40 + offset,
                         y: 40 + offset,
                         z: 0,
                         minimized: false,
+                        decorated: created.decorated,
                         // Where the user is looking. Launching something from
                         // workspace 3 and having it open on 1 is the behaviour
                         // nobody wants.
@@ -165,9 +196,16 @@ impl Scene {
                 };
                 self.paint(view, frame);
             }
+            ServerMessage::SurfaceRequest { id, request } => {
+                self.requests.set(Some((id.0, request)));
+            }
             ServerMessage::SurfaceDestroyed { id } => {
                 self.views.borrow_mut().remove(&id.0);
                 self.windows.update(|ws| ws.retain(|w| w.id != id.0));
+                // A window that vanished mid-drag takes the drag with it.
+                if self.dragging.get_untracked() == Some(id.0) {
+                    self.dragging.set(None);
+                }
             }
         }
     }

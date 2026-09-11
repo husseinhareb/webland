@@ -90,8 +90,17 @@ body {
   color: #fff;
 }
 
+/* The window's viewport onto the streamed image: the image can be larger, when
+   the client drew a shadow around its window, and what hangs outside is the
+   margin — transparent to the client, black once encoded. */
+.surface {
+  position: relative;
+  overflow: hidden;
+}
+
 .window canvas {
   display: block;
+  position: absolute;
   /* The canvas is the surface at its own resolution; the window is sized to
      match, so no scaling happens here — except for the length of a resize
      drag, when the box runs ahead of the client and the last frame is stretched
@@ -296,4 +305,12 @@ body {
   background: #1c1c22;
   color: #c8c8d0;
   font: 500 0.9rem/1.2 system-ui, sans-serif;
+}
+
+/* A window whose client draws its own titlebar: ours would sit directly above
+   the client's, two bars and two sets of buttons for one window. The bar stays
+   in the DOM and simply goes away — the shell still owns the frame, the resize
+   grip and the stacking. */
+.window.bare > .titlebar {
+  display: none;
 }

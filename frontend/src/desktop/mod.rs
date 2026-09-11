@@ -15,6 +15,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use web_sys::PointerEvent;
 use webland_core::{Size, SurfaceId};
+use webland_protocol::WindowRequest;
 
 use crate::latency::Latency;
 use crate::protocol::{
@@ -51,6 +52,11 @@ const WORKSPACES: u32 = 4;
 /// are taken from the start rather than the last move, so rounding cannot
 /// accumulate over a long drag.
 type Stretch = (f64, f64, u32, u32);
+
+/// Where a client-driven move has the pointer, relative to the window's corner.
+/// Empty until the first pointer event of the gesture: the client asks to be
+/// moved without saying from where.
+type Held = StoredValue<Rc<Cell<Option<(f64, f64)>>>, LocalStorage>;
 
 /// Where a move began: the pointer's offset into the titlebar, and the corner
 /// the window started from — kept so a drag that ends on a workspace button can
@@ -135,8 +141,47 @@ pub fn Desktop() -> impl IntoView {
     // is the escape hatch for exactly this, and it makes the handles `Copy`.
     let scene = StoredValue::new_local(scene);
     let transport = StoredValue::new_local(transport);
+
+    // Moving a window whose client asked to be moved — a GTK titlebar drag.
+    // It runs here rather than in the window, because the pointer is over the
+    // client's own surface: no piece of shell chrome saw the gesture start, and
+    // the desktop is the one element every later pointer event reaches.
+    let dragging = scene.with_value(|scene| scene.dragging);
+    let held: Held = StoredValue::new_local(Rc::new(Cell::new(None)));
+    let drag_window = move |event: PointerEvent| {
+        let Some(id) = dragging.get_untracked() else {
+            return;
+        };
+        // The client says "move me", never from where, so the offset is taken
+        // on the first pointer event that follows and kept for the gesture.
+        let (dx, dy) = held.with_value(|held| held.get()).unwrap_or_else(|| {
+            let (x, y) = scene.with_value(|scene| window_origin(scene, id));
+            (
+                event.client_x() - f64::from(x),
+                event.client_y() - f64::from(y),
+            )
+        });
+        held.with_value(|held| held.set(Some((dx, dy))));
+        #[allow(clippy::cast_possible_truncation)]
+        scene.with_value(|scene| {
+            scene.move_to(
+                id,
+                (event.client_x() - dx) as i32,
+                (event.client_y() - dy) as i32,
+            );
+        });
+    };
+    let drop_window = move |_: PointerEvent| {
+        if dragging.get_untracked().is_some() {
+            dragging.set(None);
+            held.with_value(|held| held.set(None));
+        }
+    };
+
     view! {
-        <main node_ref=desktop_ref id="webland-desktop">
+        <main node_ref=desktop_ref id="webland-desktop"
+              on:pointermove=drag_window on:pointerup=drop_window
+              on:pointercancel=drop_window>
             <p class="status">{move || status.get()}</p>
             // Iterate ids, not states. `<For>` rebuilds a row whenever its item
             // value changes, and rebuilding a row means a brand new <canvas> —
@@ -432,19 +477,51 @@ fn Window(
 
     let minimize = move |_: PointerEvent| scene.with_value(|scene| scene.set_minimized(id, true));
 
-    let toggle_maximize = move |_: PointerEvent| {
-        let maximize = !scene.with_value(|scene| scene.is_maximized(id));
+    let set_maximized = move |maximize: bool| {
         scene.with_value(|scene| scene.set_maximized(id, maximize));
         send(&ClientMessage::SetMaximized {
             id: SurfaceId(id),
             size: if maximize { maximized_size() } else { None },
         });
     };
+    let toggle_maximize = move |_: PointerEvent| {
+        set_maximized(!scene.with_value(|scene| scene.is_maximized(id)));
+    };
+
+    // The same gestures, arriving from the client's own titlebar instead of the
+    // shell's. A self-decorated window has no chrome here to click, so this is
+    // the only way its buttons do anything at all.
+    Effect::new(move |_| {
+        let Some((target, request)) = scene.with_value(|scene| scene.requests.get()) else {
+            return;
+        };
+        if target != id {
+            return;
+        }
+        scene.with_value(|scene| scene.requests.set(None));
+        match request {
+            WindowRequest::Move => scene.with_value(|scene| {
+                scene.raise(SurfaceId(id));
+                scene.dragging.set(Some(id));
+            }),
+            WindowRequest::Maximize => set_maximized(true),
+            WindowRequest::Unmaximize => set_maximized(false),
+            WindowRequest::Minimize => scene.with_value(|scene| scene.set_minimized(id, true)),
+        }
+    });
 
     // Raising and focusing are one gesture: the browser stacks, the compositor
     // only learns who has the seat.
-    let focus = move |_: PointerEvent| {
+    //
+    // Alt held makes it a move instead, which is the only way to shift a window
+    // that has no titlebar here and whose client does not offer one either — a
+    // client that decorates itself is assumed to, but nothing makes it.
+    let focus = move |event: PointerEvent| {
         scene.with_value(|scene| scene.raise(SurfaceId(id)));
+        if event.alt_key() {
+            scene.with_value(|scene| scene.dragging.set(Some(id)));
+            return;
+        }
         send(&ClientMessage::Focus { id: SurfaceId(id) });
     };
 
@@ -489,13 +566,54 @@ fn Window(
         })
     };
     let title = move || state().map(|w| w.title).unwrap_or_default();
-    // Memoised, and deliberately: assigning `canvas.width` clears the canvas
-    // even when the value is unchanged, so a plain closure would wipe the
-    // surface every time the window was raised or dragged — and an idle client
-    // sends no frame to paint it back.
-    let size = Memo::new(move |_| state().map_or((0, 0), |w| (w.width, w.height)));
+    // The canvas is the whole streamed image, which for a client that drew a
+    // shadow around itself is bigger than the window; the box it sits in is the
+    // window, and the canvas is offset so the window's corner lands in the
+    // corner. A resize drag scales both, stretching the last frame until the
+    // client answers at the new size — the same stretch, applied to a picture
+    // that is now only partly on show.
+    let scale = move || {
+        state().map_or((1.0, 1.0), |w| {
+            (
+                f64::from(w.width) / f64::from(w.content.width.max(1)),
+                f64::from(w.height) / f64::from(w.content.height.max(1)),
+            )
+        })
+    };
+    let surface_style = move || {
+        state().map_or_else(String::new, |w| {
+            let ratio = crate::scene::pixel_ratio();
+            format!(
+                "width:{}px; height:{}px;",
+                f64::from(w.width) / ratio,
+                f64::from(w.height) / ratio,
+            )
+        })
+    };
+    let canvas_style = move || {
+        state().map_or_else(String::new, |w| {
+            let ratio = crate::scene::pixel_ratio();
+            let (sx, sy) = scale();
+            let (image_w, image_h) = w.image;
+            format!(
+                "width:{}px; height:{}px; left:{}px; top:{}px;",
+                f64::from(image_w) * sx / ratio,
+                f64::from(image_h) * sy / ratio,
+                -f64::from(w.content.x) * sx / ratio,
+                -f64::from(w.content.y) * sy / ratio,
+            )
+        })
+    };
     view! {
-        <div node_ref=frame_ref class="window" style=style data-window=id.to_string()>
+        // `bare` drops the shell's titlebar for a window that drew its own.
+        //
+        // ponytail: it is dropped for anything that never asked to be decorated,
+        // which xdg-decoration says to read as "the client decorates itself" —
+        // true of GTK, and of nothing that draws no chrome at all. Such a window
+        // keeps its resize grip and moves on alt-drag, but loses the shell's
+        // close button; give the panel's task button a close if one turns up.
+        <div node_ref=frame_ref class="window" style=style data-window=id.to_string()
+             class:bare=move || state().is_some_and(|w| !w.decorated)>
             <div class="titlebar" on:pointerdown=start_drag on:pointermove=do_drag
                  on:pointerup=end_drag on:pointercancel=end_drag>
                 <span class="title">{title}</span>
@@ -506,17 +624,10 @@ fn Window(
             // One bitmap pixel per *device* pixel. Dividing by the ratio is
             // what keeps a surface sharp: without it the browser stretches the
             // bitmap over `devicePixelRatio` screen pixels and softens it.
-            <canvas node_ref=canvas_ref data-surface=id.to_string()
-                    style=move || {
-                        let ratio = crate::scene::pixel_ratio();
-                        let (width, height) = size.get();
-                        format!(
-                            "width:{}px; height:{}px;",
-                            f64::from(width) / ratio,
-                            f64::from(height) / ratio,
-                        )
-                    }
-                    on:pointerdown=focus></canvas>
+            <div class="surface" style=surface_style>
+                <canvas node_ref=canvas_ref data-surface=id.to_string()
+                        style=canvas_style on:pointerdown=focus></canvas>
+            </div>
             <div class="grip" on:pointerdown=start_resize on:pointermove=do_resize
                  on:pointerup=end_resize on:pointercancel=end_resize
                  title="Resize"></div>

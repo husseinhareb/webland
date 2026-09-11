@@ -27,13 +27,14 @@
 /// Re-exported so downstream crates pin one Wayland stack.
 pub use smithay;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::unix::io::OwnedFd;
 use std::sync::Arc;
 
 use webland_core::{Rect, Size, SurfaceId};
 use webland_protocol::{
     ClientMessage, Codec, InputEvent, Press, ServerMessage, SurfaceCreated, SurfaceFrame,
+    WindowRequest,
 };
 
 use smithay::backend::allocator::dmabuf::Dmabuf;
@@ -119,6 +120,12 @@ pub struct Webland {
     size: (i32, i32),
     /// Send the launcher's list on the next pass.
     announce_applications: bool,
+    /// Toplevels that asked the compositor to decorate them, and so must not be
+    /// given a second titlebar by the shell. See [`Webland::decorates_itself`].
+    server_decorated: HashSet<ObjectId>,
+    /// Move, maximize and minimize asked for by a client's own titlebar, waiting
+    /// to go to the browser, which owns where windows sit.
+    requests: Vec<(ObjectId, WindowRequest)>,
 }
 
 impl BufferHandler for Webland {
@@ -156,6 +163,21 @@ impl XdgShellHandler for Webland {
         surface.with_pending_state(|state| {
             state.size = Some((width, height).into());
             state.states.set(xdg_toplevel::State::Activated);
+            // Tiled on all four edges, which is a lie about the layout told for
+            // its side effect: a self-decorating client drops its drop shadow
+            // and its rounded corners when an edge is tiled, because neither
+            // makes sense against a neighbour. Without it the client's shadow
+            // margin is part of the buffer, and a margin that is transparent to
+            // the client is opaque black once encoded — a black band around
+            // every GTK window. Tiling compositors use exactly this trick.
+            for edge in [
+                xdg_toplevel::State::TiledLeft,
+                xdg_toplevel::State::TiledRight,
+                xdg_toplevel::State::TiledTop,
+                xdg_toplevel::State::TiledBottom,
+            ] {
+                state.states.set(edge);
+            }
         });
         surface.send_configure();
     }
@@ -163,6 +185,32 @@ impl XdgShellHandler for Webland {
     fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {}
 
     fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
+
+    /// The gestures a self-decorating client makes on its own titlebar.
+    ///
+    /// The shell owns window position, stacking and which windows are hidden, so
+    /// none of this can be answered here: it is forwarded to the browser, which
+    /// does the same thing it does when its own chrome is clicked. Queued rather
+    /// than sent, because the transport is only in reach once a frame goes out.
+    fn move_request(&mut self, surface: ToplevelSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
+        self.requests
+            .push((surface.wl_surface().id(), WindowRequest::Move));
+    }
+
+    fn maximize_request(&mut self, surface: ToplevelSurface) {
+        self.requests
+            .push((surface.wl_surface().id(), WindowRequest::Maximize));
+    }
+
+    fn unmaximize_request(&mut self, surface: ToplevelSurface) {
+        self.requests
+            .push((surface.wl_surface().id(), WindowRequest::Unmaximize));
+    }
+
+    fn minimize_request(&mut self, surface: ToplevelSurface) {
+        self.requests
+            .push((surface.wl_surface().id(), WindowRequest::Minimize));
+    }
 
     fn reposition_request(
         &mut self,
@@ -182,19 +230,33 @@ impl XdgShellHandler for Webland {
 /// compositor's to choose, and this one has only one answer.
 impl XdgDecorationHandler for Webland {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        self.server_decorated.insert(toplevel.wl_surface().id());
         Self::decorate_server_side(&toplevel);
     }
 
     fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: DecorationMode) {
+        self.server_decorated.insert(toplevel.wl_surface().id());
         Self::decorate_server_side(&toplevel);
     }
 
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        self.server_decorated.insert(toplevel.wl_surface().id());
         Self::decorate_server_side(&toplevel);
     }
 }
 
 impl Webland {
+    /// Whether this toplevel draws its own titlebar.
+    ///
+    /// A client that never creates a decoration object has no way to be told the
+    /// compositor decorates, and xdg-decoration says to assume it decorates
+    /// itself — which is exactly what GTK does, since it does not implement the
+    /// protocol at all. The shell skips its chrome for these, or the window
+    /// wears two titlebars.
+    fn decorates_itself(&self, surface: &WlSurface) -> bool {
+        !self.server_decorated.contains(&surface.id())
+    }
+
     /// Tell a toplevel the compositor is drawing its decorations.
     fn decorate_server_side(toplevel: &ToplevelSurface) {
         toplevel.with_pending_state(|state| {
@@ -318,12 +380,19 @@ fn inject_input(
     let serial = SERIAL_COUNTER.next_serial();
     match event {
         InputEvent::PointerMotion { position } => {
+            // The browser points at a pixel of the image it was sent; the client
+            // is owed a point in its own surface. Those differ by wherever the
+            // image was cut from — nothing for a client sent its whole buffer,
+            // the shadow margin for one that was cropped to its window, which is
+            // a pointer landing a margin's width from where it was pointed.
+            let (origin_x, origin_y) = image_origin(surface);
             // The single surface sits at the origin: surface-local == compositor.
             pointer.motion(
                 state,
                 Some((surface.clone(), (0.0, 0.0).into())),
                 &MotionEvent {
-                    location: (position.x, position.y).into(),
+                    location: (position.x + f64::from(origin_x), position.y + f64::from(origin_y))
+                        .into(),
                     serial,
                     time,
                 },
@@ -709,6 +778,63 @@ fn window_geometry(surface: &WlSurface) -> Option<Rectangle<i32, Logical>> {
     Some(Rectangle::from_size((size.w, size.h).into()))
 }
 
+/// Where the streamed image's top-left sits in the surface's own coordinates.
+///
+/// The two capture paths disagree, and everything that maps between browser
+/// pixels and client pixels has to know which one ran: a surface with
+/// subsurfaces is composited by [`capture_tree`], which crops to the window
+/// rectangle, while one that draws into a single buffer is sent whole, shadow
+/// margin and all. Same rule as [`capture`] picks by, in one place so a pointer
+/// cannot land somewhere the picture never showed.
+fn image_origin(surface: &WlSurface) -> (i32, i32) {
+    if get_children(surface).is_empty() {
+        return (0, 0);
+    }
+    window_geometry(surface).map_or((0, 0), |geometry| (geometry.loc.x, geometry.loc.y))
+}
+
+/// The window itself within the streamed image: what the browser should show,
+/// and nothing the client drew around it.
+///
+/// A client's shadow margin is transparent to the client and black once
+/// encoded, so a browser that drew the whole image would frame every window in
+/// black. Clamped to the image, because a client is free to declare a geometry
+/// larger than what it committed.
+fn content_rect(surface: &WlSurface, image: Size) -> Rect {
+    let Some(geometry) = window_geometry(surface) else {
+        return Rect {
+            x: 0,
+            y: 0,
+            width: image.width,
+            height: image.height,
+        };
+    };
+    let origin = image_origin(surface);
+    clip(
+        (geometry.loc.x - origin.0, geometry.loc.y - origin.1),
+        (geometry.size.w, geometry.size.h),
+        image,
+    )
+}
+
+/// The window rectangle as the browser can actually use it: inside the image,
+/// never empty, never negative.
+fn clip(offset: (i32, i32), size: (i32, i32), image: Size) -> Rect {
+    #[allow(clippy::cast_sign_loss)]
+    let (x, y) = (
+        offset.0.max(0).unsigned_abs().min(image.width),
+        offset.1.max(0).unsigned_abs().min(image.height),
+    );
+    #[allow(clippy::cast_sign_loss)]
+    let (width, height) = (size.0.max(0).unsigned_abs(), size.1.max(0).unsigned_abs());
+    Rect {
+        x: i32::try_from(x).unwrap_or(0),
+        y: i32::try_from(y).unwrap_or(0),
+        width: width.min(image.width - x).max(1),
+        height: height.min(image.height - y).max(1),
+    }
+}
+
 /// Composite a surface and its subsurfaces into one image.
 ///
 /// A client with client-side decorations — every GTK app, Firefox among them —
@@ -1073,6 +1199,18 @@ fn stream_dirty(
     if std::mem::take(&mut state.announce_applications) {
         emit(ServerMessage::Applications(applications.listing()));
     }
+    // A request names a surface the browser has never heard of until that
+    // surface has been announced; one arriving that early is dropped rather than
+    // queued, since the gesture it belongs to is over by the time a window
+    // exists to apply it to.
+    for (surface, request) in std::mem::take(&mut state.requests) {
+        if let Some(tracked) = known.get(&surface) {
+            emit(ServerMessage::SurfaceRequest {
+                id: tracked.id,
+                request,
+            });
+        }
+    }
     let toplevels: Vec<WlSurface> = state
         .xdg_shell_state
         .toplevel_surfaces()
@@ -1113,15 +1251,32 @@ fn stream_dirty(
         };
         tracked.commits = commits;
 
+        // Asked every announce rather than once: a client creates its decoration
+        // object early, but nothing in the protocol makes it do so before its
+        // first buffer, and a resize or a keyframe re-sends this anyway.
+        let decorates_itself = state.decorates_itself(surface);
+
         // A resize invalidates whatever the browser is holding, and so does a
         // browser that has just joined: both take the whole surface.
         let resized = tracked.size != Some(size);
         let announced = keyframe || resized;
         if announced {
             tracked.size = Some(size);
+            // Temporary: the streamed image against the window the client says
+            // it drew. A wider image is the client's shadow margin, which is
+            // transparent to the client and black once encoded.
+            tracing::debug!(
+                id = tracked.id.0,
+                image = ?(size.width, size.height),
+                content = ?content_rect(surface, size),
+                decorated = !decorates_itself,
+                "surface announced"
+            );
             emit(ServerMessage::SurfaceCreated(SurfaceCreated {
                 id: tracked.id,
                 size,
+                content: content_rect(surface, size),
+                decorated: !decorates_itself,
             }));
         }
         // Only a resize needs a new encoder — the filter graph and the codec
@@ -1260,6 +1415,7 @@ fn stream_dirty(
         }
         alive
     });
+    state.server_decorated.retain(|id| live.contains(id));
 }
 
 /// The render node to open, for both the dmabuf global and the encoder.
@@ -1347,6 +1503,8 @@ pub fn run_winit(
         focus: None,
         size: configured_size(),
         announce_applications: false,
+        server_decorated: HashSet::new(),
+        requests: Vec::new(),
     };
 
     let keyboard = state
@@ -1559,6 +1717,8 @@ pub fn run_headless(
         focus: None,
         size: configured_size(),
         announce_applications: false,
+        server_decorated: HashSet::new(),
+        requests: Vec::new(),
     };
 
     let keyboard = state
@@ -1656,7 +1816,7 @@ delegate_data_device!(Webland);
 mod tests {
     use super::{
         FrameClock, IDLE_FRAME_INTERVAL, INITIAL_FRAME_CREDIT, MAX_FRAME_CREDIT, changed_region,
-        crop,
+        clip, crop,
     };
     use std::time::{Duration, Instant};
     use webland_core::{Rect, Size};
@@ -1668,6 +1828,23 @@ mod tests {
             width,
             height,
         }
+    }
+
+    #[test]
+    fn clip_keeps_the_window_inside_the_image() {
+        let image = Size {
+            width: 100,
+            height: 80,
+        };
+        // The ordinary case: a client that drew a 10px shadow all round.
+        assert_eq!(clip((10, 10), (80, 60), image), rect(10, 10, 80, 60));
+        // A geometry larger than what was committed is trimmed, not trusted.
+        assert_eq!(clip((10, 10), (200, 200), image), rect(10, 10, 90, 70));
+        // Nonsense stays inside the image and stays visible: an empty rectangle
+        // would be a window drawn at zero pixels, which reads as a lost window.
+        assert_eq!(clip((-5, -5), (50, 40), image), rect(0, 0, 50, 40));
+        assert_eq!(clip((500, 500), (50, 40), image), rect(100, 80, 1, 1));
+        assert_eq!(clip((0, 0), (0, 0), image), rect(0, 0, 1, 1));
     }
 
     #[test]

@@ -137,7 +137,11 @@ answers.
 The chrome is the only chrome: the compositor implements `xdg-decoration` and
 answers every client `ServerSide`, so a client that would otherwise draw its own
 titlebar does not put a second one, with a second set of buttons, inside the one
-the shell drew.
+the shell drew. Clients that never ask — GTK does not implement the protocol at
+all, and its headerbar is a widget rather than a decoration — get the opposite
+treatment: the shell leaves its own titlebar off and forwards their move,
+maximize and minimize requests to the browser, so the client's own bar drives
+the same window management the shell's would have.
 
 Workspaces are the clearest case of the architecture paying off: the browser
 already holds every window, so a workspace is a filter over state it has, and

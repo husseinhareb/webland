@@ -237,7 +237,7 @@ mod tests {
     use super::{FrameSink, accept, bind};
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message as WsMessage;
-    use webland_core::{Point, Size, SurfaceId};
+    use webland_core::{Point, Rect, Size, SurfaceId};
     use webland_protocol::{
         ClientMessage, InputEvent, ServerMessage, SurfaceCreated, decode, encode,
     };
@@ -254,6 +254,13 @@ mod tests {
                 width: 10,
                 height: 20,
             },
+            content: Rect {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 20,
+            },
+            decorated: true,
         });
         sink.emit(frame.clone());
 
@@ -277,6 +284,13 @@ mod tests {
                     width: 1920,
                     height: 1080,
                 },
+                content: Rect {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+                decorated: true,
             }));
             input
         });
