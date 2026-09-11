@@ -305,10 +305,15 @@ fn Panel(
             <div class="tasks">
                 // Only this workspace's windows. A task list showing every
                 // window on every workspace is the thing workspaces exist to
-                // stop.
+                // stop — and a menu is not a window, so popups stay out of it
+                // whichever workspace they are on.
                 <For
                     each=move || {
-                        windows.get().into_iter().filter(|w| w.workspace == current.get()).collect::<Vec<_>>()
+                        windows
+                            .get()
+                            .into_iter()
+                            .filter(|w| w.parent.is_none() && w.workspace == current.get())
+                            .collect::<Vec<_>>()
                     }
                     key=|window| (window.id, window.title.clone())
                     let:window
@@ -538,7 +543,36 @@ fn Window(
                 .with(|ws| ws.iter().find(|w| w.id == id).cloned())
         })
     };
+    // A popup hangs off the window that opened it: it is placed where that
+    // window is now, not where it was when the client asked, and it is hidden
+    // whenever its parent is. Read reactively, so dragging the parent drags the
+    // menu with it.
+    let anchored = move || {
+        let anchor = state()?.parent?;
+        let parent = scene.with_value(|scene| {
+            scene
+                .windows
+                .with(|ws| ws.iter().find(|w| w.id == anchor.parent.0).cloned())
+        })?;
+        Some((anchor, parent))
+    };
     let style = move || {
+        if let Some((anchor, parent)) = anchored() {
+            let ratio = crate::scene::pixel_ratio();
+            let elsewhere = parent.workspace != current.get();
+            let hidden = if parent.minimized || elsewhere {
+                "display:none;"
+            } else {
+                ""
+            };
+            return format!(
+                "left:{}px; top:{}px; z-index:{}; width:{}px; {hidden}",
+                f64::from(parent.x) + f64::from(anchor.x) / ratio,
+                f64::from(parent.y) + f64::from(anchor.y) / ratio,
+                parent.z + 1,
+                f64::from(state().map_or(0, |w| w.width)) / ratio,
+            );
+        }
         state().map_or_else(String::new, |w| {
             let ratio = crate::scene::pixel_ratio();
             // Hidden with `display`, never unmounted: tearing the row down would
@@ -613,7 +647,8 @@ fn Window(
         // keeps its resize grip and moves on alt-drag, but loses the shell's
         // close button; give the panel's task button a close if one turns up.
         <div node_ref=frame_ref class="window" style=style data-window=id.to_string()
-             class:bare=move || state().is_some_and(|w| !w.decorated)>
+             class:bare=move || state().is_some_and(|w| !w.decorated)
+             class:popup=move || state().is_some_and(|w| w.parent.is_some())>
             <div class="titlebar" on:pointerdown=start_drag on:pointermove=do_drag
                  on:pointerup=end_drag on:pointercancel=end_drag>
                 <span class="title">{title}</span>

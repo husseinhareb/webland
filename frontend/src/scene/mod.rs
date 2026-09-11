@@ -18,7 +18,7 @@ use leptos::prelude::*;
 use web_sys::HtmlCanvasElement;
 use webland_core::SurfaceId;
 use webland_core::Rect;
-use webland_protocol::{Application, Codec, ServerMessage, SurfaceFrame, WindowRequest};
+use webland_protocol::{Anchor, Application, Codec, ServerMessage, SurfaceFrame, WindowRequest};
 
 use crate::compositor::{Renderer, SurfaceRenderer};
 use crate::decode::Decoder;
@@ -61,6 +61,11 @@ pub struct WindowState {
     /// stacking: switching workspaces shows and hides windows and tells the
     /// compositor nothing.
     pub workspace: u32,
+    /// Set when this is a popup — a menu or a tooltip — which is not a window:
+    /// it has no chrome, no task button and no position of its own, and hangs
+    /// off the surface that opened it until that surface goes or it is
+    /// dismissed.
+    pub parent: Option<Anchor>,
     /// Whether the shell draws this window's chrome. False for a client that
     /// drew its own titlebar, where a second one would sit directly above it.
     pub decorated: bool,
@@ -139,6 +144,9 @@ impl Scene {
                         if let Some(window) = ws.iter_mut().find(|w| w.id == id) {
                             window.image = (width, height);
                             window.content = created.content;
+                            // A menu that was repositioned is announced again
+                            // at the same size, and hangs somewhere new.
+                            window.parent = created.parent;
                             window.width = created.content.width;
                             window.height = created.content.height;
                             // Re-sent with every announce, and worth taking: a
@@ -155,8 +163,16 @@ impl Scene {
                     }
                     return;
                 }
-                let offset = self.opened.get() * CASCADE;
-                self.opened.set(self.opened.get() + 1);
+                // A popup is placed by its client, against the window that
+                // opened it, so it takes no place in the cascade and none in
+                // the stack: it draws above its parent, wherever that is.
+                let offset = if created.parent.is_some() {
+                    0
+                } else {
+                    let offset = self.opened.get() * CASCADE;
+                    self.opened.set(self.opened.get() + 1);
+                    offset
+                };
                 self.top.set(self.top.get() + 1);
                 self.windows.update(|ws| {
                     ws.push(WindowState {
@@ -170,6 +186,7 @@ impl Scene {
                         y: 40 + offset,
                         z: 0,
                         minimized: false,
+                        parent: created.parent,
                         decorated: created.decorated,
                         // Where the user is looking. Launching something from
                         // workspace 3 and having it open on 1 is the behaviour
@@ -178,7 +195,9 @@ impl Scene {
                         restore: None,
                     });
                 });
-                self.raise(created.id);
+                if created.parent.is_none() {
+                    self.raise(created.id);
+                }
             }
             ServerMessage::Applications(applications) => self.applications.set(applications),
             ServerMessage::SurfaceTitle { id, title } => {

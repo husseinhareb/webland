@@ -314,3 +314,17 @@ body {
 .window.bare > .titlebar {
   display: none;
 }
+
+/* A popup is the client's own surface, shadow, corners and all: the shell has
+   no chrome to add and nothing to frame it with. */
+.window.popup {
+  background: none;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.window.popup > .titlebar,
+.window.popup > .grip {
+  display: none;
+}

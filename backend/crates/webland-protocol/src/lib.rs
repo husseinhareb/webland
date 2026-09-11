@@ -90,6 +90,20 @@ pub struct Application {
     pub icon: Option<String>,
 }
 
+/// Where a popup hangs: which surface it belongs to, and where on it.
+///
+/// A menu is not a window. It has no chrome, no place in the panel and no
+/// position of its own — the client decided where it goes relative to the
+/// surface that opened it, and the browser's only job is to put it there and
+/// keep it there while that surface moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Anchor {
+    pub parent: SurfaceId,
+    /// Offset from the parent window's top-left, in the same pixels as `size`.
+    pub x: i32,
+    pub y: i32,
+}
+
 /// A surface appeared; the browser should allocate a scene node for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SurfaceCreated {
@@ -102,6 +116,9 @@ pub struct SurfaceCreated {
     /// client and black once encoded, so the browser is told what to show and
     /// clips the rest away.
     pub content: Rect,
+    /// Set when this surface is a popup — a menu, a tooltip, a combobox list —
+    /// rather than a window of its own.
+    pub parent: Option<Anchor>,
     /// Whether the shell should draw this window's chrome.
     ///
     /// False for a client that decorates itself — a GTK application, whose
@@ -283,6 +300,7 @@ mod tests {
                 width: 800,
                 height: 600,
             },
+            parent: None,
             decorated: true,
         });
         let frame = encode(&msg).unwrap();

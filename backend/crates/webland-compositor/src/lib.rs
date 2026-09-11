@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use webland_core::{Rect, Size, SurfaceId};
 use webland_protocol::{
-    ClientMessage, Codec, InputEvent, Press, ServerMessage, SurfaceCreated, SurfaceFrame,
+    Anchor, ClientMessage, Codec, InputEvent, Press, ServerMessage, SurfaceCreated, SurfaceFrame,
     WindowRequest,
 };
 
@@ -126,6 +126,9 @@ pub struct Webland {
     /// Move, maximize and minimize asked for by a client's own titlebar, waiting
     /// to go to the browser, which owns where windows sit.
     requests: Vec<(ObjectId, WindowRequest)>,
+    /// Open popups — menus, tooltips, combobox lists — oldest first, so a
+    /// submenu always follows the menu it came from.
+    popups: Vec<PopupSurface>,
 }
 
 impl BufferHandler for Webland {
@@ -182,8 +185,28 @@ impl XdgShellHandler for Webland {
         surface.send_configure();
     }
 
-    fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {}
+    /// A menu, a tooltip, a combobox list: a surface the client places itself,
+    /// against the window that opened it.
+    ///
+    /// The positioner does the placing — anchor rectangle, gravity and offset,
+    /// all of it relative to the parent's window geometry — and smithay works
+    /// the rectangle out. Nothing here constrains it to the screen: the browser
+    /// knows where the parent window actually sits and the compositor does not.
+    fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        surface.with_pending_state(|state| {
+            state.geometry = positioner.get_geometry();
+        });
+        // An error means the popup is already mapped, which is not ours to
+        // configure a second time.
+        if surface.send_configure().is_err() {
+            return;
+        }
+        self.popups.push(surface);
+    }
 
+    /// A popup asking for the pointer means a menu: it stays up until something
+    /// outside it is clicked. That click arrives as a focus change from the
+    /// browser, so there is nothing to grab here — see [`dismiss_popups`].
     fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
 
     /// The gestures a self-decorating client makes on its own titlebar.
@@ -212,12 +235,18 @@ impl XdgShellHandler for Webland {
             .push((surface.wl_surface().id(), WindowRequest::Minimize));
     }
 
+    /// The client moved a popup that is already up — a menu that would have run
+    /// off the screen, usually.
     fn reposition_request(
         &mut self,
-        _surface: PopupSurface,
-        _positioner: PositionerState,
-        _token: u32,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
     ) {
+        surface.with_pending_state(|state| {
+            state.geometry = positioner.get_geometry();
+        });
+        surface.send_repositioned(token);
     }
 }
 
@@ -778,6 +807,71 @@ fn window_geometry(surface: &WlSurface) -> Option<Rectangle<i32, Logical>> {
     Some(Rectangle::from_size((size.w, size.h).into()))
 }
 
+/// Where a surface hangs, if it is a popup rather than a window.
+///
+/// The offset is the popup's own geometry, which the positioner already
+/// expressed relative to the parent's window geometry — the same rectangle the
+/// browser clips the parent to, so the two agree about where the corner is.
+fn popup_anchor(
+    state: &Webland,
+    known: &HashMap<ObjectId, Tracked>,
+    surface: &WlSurface,
+) -> Option<Anchor> {
+    let popup = state
+        .popups
+        .iter()
+        .find(|popup| popup.wl_surface().id() == surface.id())?;
+    let parent = known.get(&popup.get_parent_surface()?.id())?.id;
+    let geometry = popup.with_pending_state(|state| state.geometry);
+    Some(Anchor {
+        parent,
+        x: geometry.loc.x,
+        y: geometry.loc.y,
+    })
+}
+
+/// Close every popup that the newly focused surface does not belong to.
+///
+/// This is what a pointer grab would do in a compositor that took one: a menu
+/// stays up until something outside it is clicked, and then it goes. The chain
+/// matters — clicking a submenu must not close the menu it opened from — so
+/// what survives is the focused surface and its ancestors.
+fn dismiss_popups(state: &mut Webland, focused: Option<ObjectId>) {
+    let keep = ancestry(focused, |id| {
+        state
+            .popups
+            .iter()
+            .find(|popup| popup.wl_surface().id() == *id)
+            .and_then(PopupSurface::get_parent_surface)
+            .map(|parent| parent.id())
+    });
+    state.popups.retain(|popup| {
+        if keep.contains(&popup.wl_surface().id()) {
+            return true;
+        }
+        popup.send_popup_done();
+        false
+    });
+}
+
+/// A surface and everything it hangs from, nearest first.
+///
+/// The chain is the client's to describe, so it is not to be trusted with a
+/// loop: a popup that claims to be its own ancestor would spin here forever,
+/// taking the compositor with it.
+fn ancestry<T: Clone + PartialEq>(start: Option<T>, parent_of: impl Fn(&T) -> Option<T>) -> Vec<T> {
+    let mut chain: Vec<T> = Vec::new();
+    let mut current = start;
+    while let Some(id) = current {
+        if chain.contains(&id) {
+            break;
+        }
+        current = parent_of(&id);
+        chain.push(id);
+    }
+    chain
+}
+
 /// Where the streamed image's top-left sits in the surface's own coordinates.
 ///
 /// The two capture paths disagree, and everything that maps between browser
@@ -1041,6 +1135,7 @@ fn drain_client(
         return;
     };
     let mut events = Vec::new();
+    let mut focus_changed = false;
     let mut resize = None;
     let mut closing = Vec::new();
     let mut launching = Vec::new();
@@ -1060,7 +1155,10 @@ fn drain_client(
                 // browser that just connected has no list yet.
                 state.announce_applications = true;
             }
-            ClientMessage::Focus { id } => state.focus = Some(id),
+            ClientMessage::Focus { id } => {
+                state.focus = Some(id);
+                focus_changed = true;
+            }
             ClientMessage::Resize { size } => resize = Some(size),
             ClientMessage::CloseSurface { id } => closing.push(id),
             ClientMessage::Launch { id } => launching.push(id),
@@ -1068,6 +1166,11 @@ fn drain_client(
             ClientMessage::SetSize { id, size } => sizing.push((id, size)),
         }
     }
+    if focus_changed {
+        let focused = state.focus.and_then(|id| object_for(known, id));
+        dismiss_popups(state, focused);
+    }
+
     for id in launching {
         applications.launch(id, display);
     }
@@ -1138,12 +1241,19 @@ fn drain_client(
     // Input goes to the surface the browser raised; before it has raised
     // anything, to whichever surface exists.
     let focused = state.focus.and_then(|id| object_for(known, id));
-    let toplevels = state.xdg_shell_state.toplevel_surfaces();
-    let target = toplevels
+    let popup = state
+        .popups
         .iter()
-        .find(|toplevel| Some(toplevel.wl_surface().id()) == focused)
-        .or_else(|| toplevels.first())
-        .map(|toplevel| toplevel.wl_surface().clone());
+        .find(|popup| Some(popup.wl_surface().id()) == focused)
+        .map(|popup| popup.wl_surface().clone());
+    let toplevels = state.xdg_shell_state.toplevel_surfaces();
+    let target = popup.or_else(|| {
+        toplevels
+            .iter()
+            .find(|toplevel| Some(toplevel.wl_surface().id()) == focused)
+            .or_else(|| toplevels.first())
+            .map(|toplevel| toplevel.wl_surface().clone())
+    });
     if !events.is_empty()
         && let Some(surface) = target
     {
@@ -1177,6 +1287,9 @@ struct Tracked {
     clock: FrameClock,
     /// The title the browser has been told, so an unchanged one costs nothing.
     title: Option<String>,
+    /// Where a popup was last said to hang. A menu the client repositions keeps
+    /// its size, so a size change alone would not notice one moving.
+    anchor: Option<Anchor>,
 }
 
 /// Capture changed surfaces and emit their frames to the browser transport.
@@ -1211,13 +1324,22 @@ fn stream_dirty(
             });
         }
     }
-    let toplevels: Vec<WlSurface> = state
+    // Popups are surfaces like any other: they are captured, encoded and sent
+    // down the same path a window is. What makes one a popup is where the
+    // browser puts it, which is the anchor announced with it.
+    state.popups.retain(PopupSurface::alive);
+    let mut toplevels: Vec<WlSurface> = state
         .xdg_shell_state
         .toplevel_surfaces()
         .iter()
         .map(|toplevel| toplevel.wl_surface().clone())
         .collect();
+    toplevels.extend(state.popups.iter().map(|popup| popup.wl_surface().clone()));
     for surface in &toplevels {
+        // Read before the surface is tracked, because both want `known` and the
+        // parent's id has to be in it already — it is, since a popup cannot be
+        // mapped before the surface it hangs from.
+        let anchor = popup_anchor(state, known, surface);
         let tracked = known.entry(surface.id()).or_insert_with(|| {
             let id = SurfaceId(*next_surface_id);
             *next_surface_id += 1;
@@ -1229,6 +1351,7 @@ fn stream_dirty(
                 encoder: None,
                 clock: FrameClock::new(),
                 title: None,
+                anchor: None,
             }
         });
         let commits = tree_commits(surface);
@@ -1259,7 +1382,9 @@ fn stream_dirty(
         // A resize invalidates whatever the browser is holding, and so does a
         // browser that has just joined: both take the whole surface.
         let resized = tracked.size != Some(size);
-        let announced = keyframe || resized;
+        let moved = tracked.anchor != anchor;
+        tracked.anchor = anchor;
+        let announced = keyframe || resized || moved;
         if announced {
             tracked.size = Some(size);
             // Temporary: the streamed image against the window the client says
@@ -1276,6 +1401,7 @@ fn stream_dirty(
                 id: tracked.id,
                 size,
                 content: content_rect(surface, size),
+                parent: anchor,
                 decorated: !decorates_itself,
             }));
         }
@@ -1505,6 +1631,7 @@ pub fn run_winit(
         announce_applications: false,
         server_decorated: HashSet::new(),
         requests: Vec::new(),
+        popups: Vec::new(),
     };
 
     let keyboard = state
@@ -1719,6 +1846,7 @@ pub fn run_headless(
         announce_applications: false,
         server_decorated: HashSet::new(),
         requests: Vec::new(),
+        popups: Vec::new(),
     };
 
     let keyboard = state
@@ -1815,8 +1943,8 @@ delegate_data_device!(Webland);
 #[cfg(test)]
 mod tests {
     use super::{
-        FrameClock, IDLE_FRAME_INTERVAL, INITIAL_FRAME_CREDIT, MAX_FRAME_CREDIT, changed_region,
-        clip, crop,
+        FrameClock, IDLE_FRAME_INTERVAL, INITIAL_FRAME_CREDIT, MAX_FRAME_CREDIT, ancestry,
+        changed_region, clip, crop,
     };
     use std::time::{Duration, Instant};
     use webland_core::{Rect, Size};
@@ -1828,6 +1956,25 @@ mod tests {
             width,
             height,
         }
+    }
+
+    #[test]
+    fn ancestry_reaches_the_root_and_refuses_to_loop() {
+        // A submenu of a menu of a window: clicking the submenu must leave all
+        // three standing, which is what keeping the whole chain is for.
+        let parents = |id: &u32| match id {
+            3 => Some(2),
+            2 => Some(1),
+            _ => None,
+        };
+        assert_eq!(ancestry(Some(3), parents), vec![3, 2, 1]);
+        assert_eq!(ancestry(Some(1), parents), vec![1]);
+        assert!(ancestry(None::<u32>, parents).is_empty());
+        // A client that describes a cycle gets a finite answer, not a hang.
+        assert_eq!(
+            ancestry(Some(9), |id: &u32| Some(if *id == 9 { 8 } else { 9 })),
+            vec![9, 8]
+        );
     }
 
     #[test]

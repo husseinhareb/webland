@@ -260,6 +260,7 @@ mod tests {
                 width: 10,
                 height: 20,
             },
+            parent: None,
             decorated: true,
         });
         sink.emit(frame.clone());
@@ -290,7 +291,8 @@ mod tests {
                     width: 1920,
                     height: 1080,
                 },
-                decorated: true,
+                parent: None,
+            decorated: true,
             }));
             input
         });

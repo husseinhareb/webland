@@ -143,6 +143,12 @@ treatment: the shell leaves its own titlebar off and forwards their move,
 maximize and minimize requests to the browser, so the client's own bar drives
 the same window management the shell's would have.
 
+Menus, tooltips and combobox lists are popups: surfaces the client places
+itself, against the window that opened it. They stream down the same path a
+window does, and the browser hangs each one off its parent, so dragging a window
+with a menu open drags the menu too. A click outside dismisses them, which is
+what a pointer grab would do in a compositor that took one.
+
 Workspaces are the clearest case of the architecture paying off: the browser
 already holds every window, so a workspace is a filter over state it has, and
 switching sends nothing at all. Four of them, in the panel; drag a window onto
