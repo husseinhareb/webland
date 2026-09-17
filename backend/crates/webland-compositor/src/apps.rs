@@ -15,7 +15,9 @@ use webland_protocol::Application;
 pub struct Applications {
     /// Ordered for display; the index is the id the browser sends back.
     names: Vec<Application>,
-    commands: HashMap<u32, String>,
+    /// Already argv: quotes resolved, field codes dropped, `~/` expanded. The
+    /// command is spawned directly, so there is no shell to do any of it later.
+    commands: HashMap<u32, Vec<String>>,
     /// The `.desktop` files this listing was built from, so
     /// [`Applications::refresh`] can tell that one has come or gone.
     sources: Vec<PathBuf>,
@@ -25,7 +27,10 @@ impl Applications {
     /// Scan the usual directories.
     #[must_use]
     pub fn scan() -> Self {
-        let mut found: Vec<(String, String, Option<String>)> = Vec::new();
+        // Name, `Exec=` line, `Icon=` name, and the file's own basename — which
+        // is the other name an entry goes by, and the one a person writing a
+        // launch override is most likely to have typed.
+        let mut found: Vec<(String, String, Option<String>, String)> = Vec::new();
         let home = home();
         let dirs = dirs(&home);
         let overrides = overrides(&home);
@@ -39,27 +44,31 @@ impl Applications {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().is_some_and(|ext| ext == "desktop")
-                    && let Some(app) = read_entry(&path)
+                    && let Some((name, exec, icon)) = read_entry(&path)
                 {
-                    found.push(app);
+                    let stem = path
+                        .file_stem()
+                        .map(|stem| stem.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    found.push((name, exec, icon, stem));
                 }
             }
         }
         // Stable, and by name: the launcher is a list a person reads.
-        found.sort_by_key(|(name, _, _)| name.to_lowercase());
+        found.sort_by_key(|(name, ..)| name.to_lowercase());
         found.dedup_by(|a, b| a.0 == b.0);
 
         let mut names = Vec::with_capacity(found.len());
         let mut commands = HashMap::with_capacity(found.len());
-        for (index, (name, exec, icon)) in found.into_iter().enumerate() {
+        for (index, (name, exec, icon, stem)) in found.into_iter().enumerate() {
             let Ok(id) = u32::try_from(index) else { break };
-            let exec = overrides.get(&name.to_lowercase()).cloned().unwrap_or(exec);
+            let exec = override_for(&overrides, &name, &stem).map_or(exec, Clone::clone);
             names.push(Application {
                 id,
                 name,
                 icon: icon.as_deref().and_then(icon_data_url),
             });
-            commands.insert(id, exec);
+            commands.insert(id, argv(&exec, &home));
         }
         Self {
             names,
@@ -102,13 +111,16 @@ impl Applications {
     ///
     /// The id must have come from [`Applications::listing`]; an unknown one is
     /// ignored rather than guessed at.
-    pub fn launch(&self, id: u32, display: &std::ffi::OsStr) {
-        let Some(command) = self.commands.get(&id) else {
+    /// `xdisplay` is the X server's number, when one is running: an X client
+    /// reads `DISPLAY` and nothing else, and never learns there is a Wayland
+    /// socket beside it.
+    pub fn launch(&self, id: u32, display: &std::ffi::OsStr, xdisplay: Option<u32>) {
+        let Some(argv) = self.commands.get(&id) else {
             tracing::warn!(id, "launch request for an unknown application");
             return;
         };
-        let mut parts = command.split_whitespace();
-        let Some(program) = parts.next() else {
+        let Some((program, arguments)) = argv.split_first() else {
+            tracing::warn!(id, "launch request for an application with no command");
             return;
         };
         // Started from the user's home, not from wherever webland was launched:
@@ -116,14 +128,16 @@ impl Applications {
         // dialog in every application would open in the source tree.
         let home = home();
         let mut launcher = std::process::Command::new(program);
-        launcher.args(parts).env("WAYLAND_DISPLAY", display);
+        launcher.args(arguments).env("WAYLAND_DISPLAY", display);
+        if let Some(number) = xdisplay {
+            launcher.env("DISPLAY", format!(":{number}"));
+        }
         if !home.is_empty() {
             launcher.current_dir(&home);
         }
-        match launcher.spawn()
-        {
-            Ok(_) => tracing::info!(%command, "launched"),
-            Err(err) => tracing::warn!(%command, %err, "could not launch"),
+        match launcher.spawn() {
+            Ok(_) => tracing::info!(?argv, "launched"),
+            Err(err) => tracing::warn!(?argv, %err, "could not launch"),
         }
     }
 }
@@ -159,7 +173,36 @@ fn overrides(home: &str) -> HashMap<String, String> {
         |_| format!("{home}/.config/webland/launch.conf"),
         |dir| format!("{dir}/webland/launch.conf"),
     );
-    parse_overrides(&std::fs::read_to_string(path).unwrap_or_default(), home)
+    parse_overrides(&std::fs::read_to_string(path).unwrap_or_default())
+}
+
+/// The override for one application, if the user wrote one.
+///
+/// An exact match on either name first, then the longest override key either
+/// name contains. The loose match is what makes the documented configuration
+/// work at all: a person writes `Firefox = …`, and the entry that has to be
+/// matched calls itself `Name=Firefox Web Browser` and lives in
+/// `firefox.desktop`. Looking only for an exact `Name=` meant the whole feature
+/// was quietly ignored on every distribution that ships that name.
+///
+/// Longest key wins so the answer does not depend on hash order: with both
+/// `Firefox` and `Firefox Developer Edition` configured, the developer edition's
+/// entry takes the one that actually names it.
+fn override_for<'a>(
+    overrides: &'a HashMap<String, String>,
+    name: &str,
+    stem: &str,
+) -> Option<&'a String> {
+    let name = name.to_lowercase();
+    let stem = stem.to_lowercase();
+    if let Some(exact) = overrides.get(&name).or_else(|| overrides.get(&stem)) {
+        return Some(exact);
+    }
+    overrides
+        .iter()
+        .filter(|(key, _)| name.contains(key.as_str()) || stem.contains(key.as_str()))
+        .max_by_key(|(key, _)| key.len())
+        .map(|(_, command)| command)
 }
 
 /// Parse `Name = command` lines, keyed by lower-cased name.
@@ -178,19 +221,18 @@ fn overrides(home: &str) -> HashMap<String, String> {
 /// Create the profile directory first — Firefox will not make one whose parent
 /// is missing, and says so in a dialog rather than on stderr.
 ///
+/// The name written here need not be the entry's whole `Name=`: see
+/// [`override_for`].
+///
 /// Blank lines and `#` comments are ignored. The first `=` separates, so a
-/// command may contain more of them.
-fn parse_overrides(text: &str, home: &str) -> HashMap<String, String> {
+/// command may contain more of them. The command is left as written; [`argv`]
+/// is what turns it into something to spawn.
+fn parse_overrides(text: &str) -> HashMap<String, String> {
     text.lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .filter_map(|line| line.split_once('='))
-        .map(|(name, command)| {
-            (
-                name.trim().to_lowercase(),
-                expand_home(command.trim(), home),
-            )
-        })
+        .map(|(name, command)| (name.trim().to_lowercase(), command.trim().to_string()))
         .filter(|(name, command)| !name.is_empty() && !command.is_empty())
         .collect()
 }
@@ -199,20 +241,14 @@ fn parse_overrides(text: &str, home: &str) -> HashMap<String, String> {
 ///
 /// The command is spawned directly, so there is no shell to do this and a
 /// literal `~` would become a directory of that name.
-fn expand_home(command: &str, home: &str) -> String {
-    command
-        .split_whitespace()
-        .map(|word| {
-            if let Some((flag, rest)) = word.split_once("=~/") {
-                format!("{flag}={home}/{rest}")
-            } else if let Some(rest) = word.strip_prefix("~/") {
-                format!("{home}/{rest}")
-            } else {
-                word.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+fn expand_home(word: &str, home: &str) -> String {
+    if let Some((flag, rest)) = word.split_once("=~/") {
+        format!("{flag}={home}/{rest}")
+    } else if let Some(rest) = word.strip_prefix("~/") {
+        format!("{home}/{rest}")
+    } else {
+        word.to_string()
+    }
 }
 
 /// Pull the name and command out of one `.desktop` file.
@@ -245,7 +281,7 @@ fn read_entry(path: &Path) -> Option<(String, String, Option<String>)> {
             _ => {}
         }
     }
-    let exec = strip_field_codes(&exec?);
+    let exec = exec?;
     let name = name?;
     (!name.is_empty() && !exec.is_empty()).then_some((name, exec, icon))
 }
@@ -354,21 +390,103 @@ fn base64(bytes: &[u8]) -> String {
     out
 }
 
-/// Drop the `%f`, `%U`, … placeholders a `.desktop` Exec line may carry.
+/// The `%f`, `%U`, … placeholders a `.desktop` Exec line may carry.
 ///
-/// They stand for files and URLs passed to the program; there are none here, and
-/// passing them through literally would have the application open a file called
-/// `%U`.
-fn strip_field_codes(exec: &str) -> String {
-    exec.split_whitespace()
-        .filter(|word| !(word.len() == 2 && word.starts_with('%')))
-        .collect::<Vec<_>>()
-        .join(" ")
+/// They stand for the files and URLs the entry was opened with; there are none
+/// here, so they are dropped. Passing one through literally has the application
+/// try to open a file called `%U` and give up, which is a launcher button that
+/// does nothing.
+const FIELD_CODES: [&str; 13] = [
+    "%f", "%F", "%u", "%U", "%d", "%D", "%n", "%N", "%i", "%c", "%k", "%v", "%m",
+];
+
+/// One `Exec=` line or launch override, as the argv to spawn.
+///
+/// Splitting on whitespace is not enough and never was. A `.desktop` file quotes
+/// any argument with a space in it — `--profile "~/My Profiles"`, `env
+/// FOO="bar baz" app` — so whitespace splitting cuts those in half and hands the
+/// quote characters themselves to the program. It also hides field codes: a
+/// quoted `"%f"` is four characters, so the old length-2 test never saw it, and
+/// inkscape and half of KDE launched with a filename of `%f`.
+fn argv(command: &str, home: &str) -> Vec<String> {
+    split_args(command)
+        .into_iter()
+        .filter(|word| !FIELD_CODES.contains(&word.as_str()))
+        // `%%` is how an Exec line spells a literal percent.
+        .map(|word| expand_home(&word.replace("%%", "%"), home))
+        .collect()
+}
+
+/// Split a command line into arguments, honouring quotes and escapes.
+///
+/// Double quotes and backslash escapes are the Desktop Entry Specification's;
+/// single quotes are not in it, but the launch override file is written by hand
+/// and a person who types them means them.
+fn split_args(command: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    // Distinct from `current` being non-empty, so `""` is an empty argument
+    // rather than no argument at all.
+    let mut started = false;
+    let mut quote: Option<char> = None;
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        match quote {
+            // Inside single quotes everything is itself, including backslashes.
+            Some('\'') => {
+                if c == '\'' {
+                    quote = None;
+                } else {
+                    current.push(c);
+                }
+            }
+            Some(_) => match c {
+                '"' => quote = None,
+                // The spec escapes exactly these four inside double quotes;
+                // anything else keeps its backslash, as a shell would.
+                '\\' => match chars.next() {
+                    Some(next @ ('"' | '\\' | '`' | '$')) => current.push(next),
+                    Some(next) => {
+                        current.push('\\');
+                        current.push(next);
+                    }
+                    None => current.push('\\'),
+                },
+                _ => current.push(c),
+            },
+            None => match c {
+                c if c.is_whitespace() => {
+                    if started {
+                        args.push(std::mem::take(&mut current));
+                        started = false;
+                    }
+                }
+                '"' | '\'' => {
+                    quote = Some(c);
+                    started = true;
+                }
+                '\\' => {
+                    started = true;
+                    if let Some(next) = chars.next() {
+                        current.push(next);
+                    }
+                }
+                _ => {
+                    started = true;
+                    current.push(c);
+                }
+            },
+        }
+    }
+    if started {
+        args.push(current);
+    }
+    args
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{base64, icon_path, parse_overrides, sources, strip_field_codes};
+    use super::{argv, base64, icon_path, override_for, parse_overrides, sources, split_args};
 
     #[test]
     fn removing_an_entry_changes_what_a_directory_holds() {
@@ -396,10 +514,88 @@ mod tests {
 
     #[test]
     fn field_codes_are_dropped_but_arguments_are_not() {
-        assert_eq!(strip_field_codes("firefox %u"), "firefox");
-        assert_eq!(strip_field_codes("kitty -e fish %F"), "kitty -e fish");
+        assert_eq!(argv("firefox %u", "/home/u"), ["firefox"]);
+        assert_eq!(argv("kitty -e fish %F", "/home/u"), ["kitty", "-e", "fish"]);
         // A percent that is not a field code is just an argument.
-        assert_eq!(strip_field_codes("app --pct 50%"), "app --pct 50%");
+        assert_eq!(argv("app --pct 50%", "/home/u"), ["app", "--pct", "50%"]);
+        // A quoted field code is still a field code. This is the one that got
+        // through: four characters, so a length-2 test never saw it, and the
+        // application was handed a file named `%f` to open.
+        assert_eq!(argv(r#"inkscape "%f""#, "/home/u"), ["inkscape"]);
+        assert_eq!(argv("gimp %U %i %c", "/home/u"), ["gimp"]);
+        // `%%` is a literal percent, and survives.
+        assert_eq!(argv("app --fmt %%s", "/home/u"), ["app", "--fmt", "%s"]);
+    }
+
+    #[test]
+    fn quoted_arguments_survive_as_one_argument() {
+        assert_eq!(
+            split_args(r#"env FOO="bar baz" app"#),
+            ["env", "FOO=bar baz", "app"]
+        );
+        assert_eq!(
+            split_args("app 'one two' three"),
+            ["app", "one two", "three"]
+        );
+        // The spec's escapes, inside double quotes and out.
+        assert_eq!(split_args(r#"app "a\"b" c\ d"#), ["app", r#"a"b"#, "c d"]);
+        // A backslash the spec does not escape keeps itself, as a shell leaves
+        // a Windows-shaped path alone.
+        assert_eq!(split_args(r#"app "a\nb""#), ["app", r"a\nb"]);
+        // An empty quoted argument is an argument.
+        assert_eq!(split_args(r#"app "" x"#), ["app", "", "x"]);
+        assert_eq!(split_args("   "), [] as [&str; 0]);
+        // An unterminated quote takes what is there rather than losing it.
+        assert_eq!(split_args(r#"app "half"#), ["app", "half"]);
+    }
+
+    #[test]
+    fn home_is_expanded_inside_a_quoted_argument() {
+        // The whole point of parsing quotes: a profile path with a space in it
+        // used to arrive as two arguments, both carrying a quote character.
+        assert_eq!(
+            argv(r#"firefox --profile "~/My Profiles/w""#, "/home/u"),
+            ["firefox", "--profile", "/home/u/My Profiles/w"]
+        );
+        assert_eq!(
+            argv("chromium --user-data-dir=~/w", "/home/u"),
+            ["chromium", "--user-data-dir=/home/u/w"]
+        );
+    }
+
+    #[test]
+    fn an_override_matches_the_name_a_person_would_have_typed() {
+        let overrides = parse_overrides("Firefox = firefox --new-instance\n");
+        // What every Linux distribution actually calls the entry, and the file
+        // it lives in. Neither is the exact `Firefox` the README asks for, and
+        // matching only the exact name is what made the whole feature a no-op.
+        assert_eq!(
+            override_for(&overrides, "Firefox Web Browser", "firefox").map(String::as_str),
+            Some("firefox --new-instance")
+        );
+        assert_eq!(
+            override_for(&overrides, "Web Browser", "firefox").map(String::as_str),
+            Some("firefox --new-instance")
+        );
+        assert_eq!(
+            override_for(&overrides, "Firefox", "org.mozilla.firefox").map(String::as_str),
+            Some("firefox --new-instance")
+        );
+        // Something else entirely is still left alone.
+        assert_eq!(override_for(&overrides, "GIMP", "gimp"), None);
+
+        // The longest matching key wins, so two overrides that both match do
+        // not depend on hash order to pick the one that names the entry.
+        let both = parse_overrides("Firefox = firefox\nFirefox Developer Edition = firefox-dev\n");
+        assert_eq!(
+            override_for(
+                &both,
+                "Firefox Developer Edition",
+                "firefox-developer-edition"
+            )
+            .map(String::as_str),
+            Some("firefox-dev")
+        );
     }
 
     #[test]
@@ -414,27 +610,24 @@ mod tests {
     }
 
     #[test]
-    fn overrides_split_on_the_first_equals_and_expand_home() {
+    fn overrides_split_on_the_first_equals() {
         let parsed = parse_overrides(
             "# a note\n\n             Firefox = firefox --no-remote --profile ~/.webland/ff\n             Chromium = chromium --user-data-dir=~/w\n",
-            "/home/u",
         );
         assert_eq!(
             parsed.get("firefox").map(String::as_str),
-            Some("firefox --no-remote --profile /home/u/.webland/ff")
+            Some("firefox --no-remote --profile ~/.webland/ff")
         );
         // Only the first `=` separates; the one in the flag is the command's.
         assert_eq!(
             parsed.get("chromium").map(String::as_str),
-            Some("chromium --user-data-dir=/home/u/w")
+            Some("chromium --user-data-dir=~/w")
         );
         assert_eq!(parsed.len(), 2);
         // A `~` that is not a home directory is left alone.
         assert_eq!(
-            parse_overrides("A = x ~backup file~", "/home/u")
-                .get("a")
-                .map(String::as_str),
-            Some("x ~backup file~")
+            argv("x ~backup file~", "/home/u"),
+            ["x", "~backup", "file~"]
         );
     }
 

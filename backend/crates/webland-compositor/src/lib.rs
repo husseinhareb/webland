@@ -1,7 +1,8 @@
 //! Wayland compositor for Webland.
 //!
-//! Built on [`smithay`]. Wayland-first: `XWayland` support, if it ever lands,
-//! goes behind a feature flag rather than into this module.
+//! Built on [`smithay`]. Wayland-first, but not Wayland-only: X11 clients run
+//! through `XWayland`, which lives in [`xwayland`] and reaches the rest of this
+//! module as surfaces like any other.
 //!
 //! Phase 1 ([`run_winit`]): render mapped surfaces into a window on the host
 //! desktop, so a real Wayland client can connect and be seen. No headless
@@ -21,7 +22,11 @@
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::default_trait_access,
-    clippy::needless_pass_by_value
+    clippy::needless_pass_by_value,
+    // `Webland` is the compositor's state, and the flags in it are independent
+    // facts about independent protocols. Folding them into an enum would say
+    // they are alternatives, which they are not.
+    clippy::struct_excessive_bools
 )]
 
 /// Re-exported so downstream crates pin one Wayland stack.
@@ -41,6 +46,7 @@ use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::gbm::GbmDevice;
 pub mod apps;
 pub mod encode;
+mod xwayland;
 
 use smithay::backend::allocator::{Buffer, Fourcc, Modifier};
 use smithay::backend::egl::{EGLContext, EGLDisplay};
@@ -62,7 +68,9 @@ use smithay::backend::renderer::{
 };
 use smithay::backend::winit::{self, WinitEvent};
 use smithay::input::keyboard::{FilterResult, KeyboardHandle, XkbConfig};
-use smithay::input::pointer::{AxisFrame, ButtonEvent, CursorImageStatus, MotionEvent, PointerHandle};
+use smithay::input::pointer::{
+    AxisFrame, ButtonEvent, CursorImageStatus, MotionEvent, PointerHandle, RelativeMotionEvent,
+};
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
@@ -70,11 +78,13 @@ use smithay::reexports::wayland_server::backend::{
     ClientData, ClientId, DisconnectReason, ObjectId,
 };
 use smithay::reexports::wayland_server::protocol::wl_buffer;
+use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::reexports::wayland_server::protocol::wl_seat;
 use smithay::reexports::wayland_server::protocol::wl_surface::{self, WlSurface};
 use smithay::reexports::wayland_server::{Client, Display, ListeningSocket, Resource};
 use smithay::reexports::winit::platform::pump_events::PumpStatus;
-use smithay::utils::{Logical, Rectangle, SERIAL_COUNTER, Serial, Transform};
+use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial, Transform};
+use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes, TraversalAction,
@@ -83,9 +93,14 @@ use smithay::wayland::compositor::{
 use smithay::wayland::dmabuf::{
     DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier, get_dmabuf,
 };
-use smithay::wayland::selection::SelectionHandler;
+use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
 use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+    request_data_device_client_selection, set_data_device_focus, set_data_device_selection,
+};
+use smithay::wayland::selection::primary_selection::{
+    request_primary_client_selection, set_primary_focus, set_primary_selection,
+    PrimarySelectionHandler, PrimarySelectionState,
 };
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface, XdgShellHandler,
@@ -95,10 +110,20 @@ use smithay::wayland::shell::xdg::decoration::{
     XdgDecorationHandler, XdgDecorationState,
 };
 use smithay::wayland::cursor_shape::CursorShapeManagerState;
+use smithay::wayland::pointer_constraints::{
+    PointerConstraint, PointerConstraintsHandler, PointerConstraintsState, with_pointer_constraint,
+};
+use smithay::wayland::relative_pointer::RelativePointerManagerState;
+use smithay::reexports::calloop::EventLoop;
+use smithay::wayland::output::OutputHandler;
+use smithay::wayland::xwayland_shell::XWaylandShellState;
+use smithay::xwayland::{X11Surface, X11Wm, XWaylandClientData};
 use smithay::wayland::shm::{ShmHandler, ShmState, with_buffer_contents};
 use smithay::{
-    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_seat, delegate_shm,
-    delegate_cursor_shape, delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_compositor, delegate_cursor_shape, delegate_data_device, delegate_dmabuf,
+    delegate_output, delegate_pointer_constraints, delegate_primary_selection,
+    delegate_relative_pointer, delegate_seat, delegate_shm, delegate_xdg_decoration,
+    delegate_xdg_shell, delegate_xwayland_shell,
 };
 
 /// Compositor state. Holds the protocol globals and the seat; owns everything a
@@ -111,6 +136,27 @@ pub struct Webland {
     dmabuf_state: DmabufState,
     seat_state: SeatState<Self>,
     data_device_state: DataDeviceState,
+    primary_selection_state: PrimarySelectionState,
+    _relative_pointer_state: RelativePointerManagerState,
+    _pointer_constraints_state: PointerConstraintsState,
+    pointer_location: Point<f64, Logical>,
+    /// The browser's window, told to clients as a monitor. See [`browser_output`].
+    output: Output,
+    /// The `xwayland_shell_v1` global, which is how `XWayland` tells the
+    /// compositor that a `wl_surface` is the one an X window draws into.
+    xwayland_shell_state: XWaylandShellState,
+    /// The window manager for the X server, once it is up. `None` without one,
+    /// which is a desktop that runs Wayland clients and no X ones.
+    xwm: Option<X11Wm>,
+    /// The X display number, for `DISPLAY` in what the browser launches.
+    xdisplay: Option<u32>,
+    /// Set once the X server has reported that it died. Startup reads it so a
+    /// server that failed on the way up is not waited out to the timeout.
+    xwayland_gone: bool,
+    /// Mapped X windows. Kept apart from `xdg_shell_state` because X windows are
+    /// not `xdg_toplevel`s: they are captured and streamed the same way, but
+    /// everything the compositor says back to one is said in X.
+    x11: Vec<X11Surface>,
     seat: Seat<Self>,
     /// Set by the browser on connect: send whole surfaces on the next frame,
     /// because a joiner has nothing for a damage rectangle to land on.
@@ -130,6 +176,15 @@ pub struct Webland {
     /// Open popups — menus, tooltips, combobox lists — oldest first, so a
     /// submenu always follows the menu it came from.
     popups: Vec<PopupSurface>,
+    /// Needed to hand the seat a selection the browser owns.
+    dh: DisplayHandle,
+    /// The browser's clipboard, which is what clients are given when they paste.
+    clipboard: String,
+    /// Text copied by a client, on its way to the browser. A pipe read cannot
+    /// happen inline — the client writes when it feels like it — so the read
+    /// runs on a thread and the answer arrives here.
+    copied: std::sync::mpsc::Sender<String>,
+    pastes: std::sync::mpsc::Receiver<String>,
     /// What the pointer currently looks like, as a CSS cursor keyword.
     cursor: String,
     /// Tell the browser about the cursor on the next pass.
@@ -145,8 +200,17 @@ impl CompositorHandler for Webland {
         &mut self.compositor_state
     }
 
+    /// The X server is a client the compositor never inserted — smithay does it,
+    /// with client data of smithay's own — so there are two places the state can
+    /// live and neither is a safe assumption.
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        &client.get_data::<ClientState>().unwrap().compositor_state
+        if let Some(data) = client.get_data::<XWaylandClientData>() {
+            return &data.compositor_state;
+        }
+        &client
+            .get_data::<ClientState>()
+            .expect("client inserted without compositor state")
+            .compositor_state
     }
 
     fn commit(&mut self, surface: &WlSurface) {
@@ -168,6 +232,9 @@ impl XdgShellHandler for Webland {
         // keeps current; `WEBLAND_SIZE` is only the value before one arrives.
         let (width, height) = self.size;
         tracing::info!(width, height, "new xdg toplevel mapped");
+        // Without this a client knows the output exists but not that it is on
+        // it, which is the half of the answer GTK reads the scale from.
+        self.output.enter(surface.wl_surface());
         surface.with_pending_state(|state| {
             state.size = Some((width, height).into());
             state.states.set(xdg_toplevel::State::Activated);
@@ -288,6 +355,15 @@ impl Webland {
     /// protocol at all. The shell skips its chrome for these, or the window
     /// wears two titlebars.
     fn decorates_itself(&self, surface: &WlSurface) -> bool {
+        // An X client never implements `xdg-decoration`; it says the same thing
+        // through `_MOTIF_WM_HINTS`, which is what `is_decorated` reads — and it
+        // reads it as "this window is client-side decorated", already the way
+        // round this asks. Not negated: an X client says nothing about motif
+        // hints far more often than not, and that silence means it wants the
+        // window manager's frame, which is the shell's to draw.
+        if let Some(window) = self.x11_for(surface) {
+            return window.is_decorated();
+        }
         !self.server_decorated.contains(&surface.id())
     }
 
@@ -335,7 +411,11 @@ impl SeatHandler for Webland {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        let client = focused.and_then(|s| self.dh.get_client(s.id()).ok());
+        set_data_device_focus(&self.dh, seat, client.clone());
+        set_primary_focus(&self.dh, seat, client);
+    }
 
     /// The client under the pointer has said what the pointer should look like.
     ///
@@ -347,11 +427,7 @@ impl SeatHandler for Webland {
     /// or one drawing a custom cursor — gets the arrow. Streaming that surface
     /// is another window's worth of machinery for a 24-pixel image; do it if a
     /// real application turns out to need it.
-    fn cursor_image(
-        &mut self,
-        _seat: &Seat<Self>,
-        image: CursorImageStatus,
-    ) {
+    fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
         let name = match image {
             CursorImageStatus::Hidden => "none",
             CursorImageStatus::Named(icon) => icon.name(),
@@ -369,13 +445,138 @@ impl SeatHandler for Webland {
 /// so the defaults, which do nothing, are the whole implementation.
 impl smithay::wayland::tablet_manager::TabletSeatHandler for Webland {}
 
+impl PointerConstraintsHandler for Webland {
+    fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
+        with_pointer_constraint(surface, pointer, |constraint| {
+            if let Some(c) = constraint
+                && !c.is_active()
+            {
+                c.activate();
+            }
+        });
+    }
+
+    fn cursor_position_hint(
+        &mut self,
+        _surface: &WlSurface,
+        _pointer: &PointerHandle<Self>,
+        location: Point<f64, Logical>,
+    ) {
+        self.pointer_location = location;
+    }
+}
+
+/// Text the clipboard is asked for in, best first. Anything else — an image, a
+/// list of files — is a copy the browser has no way to take, and is left alone.
+const TEXT_MIMES: [&str; 6] = [
+    "text/plain;charset=utf-8",
+    "text/plain",
+    "UTF8_STRING",
+    "STRING",
+    "TEXT",
+    "text/plain;charset=UTF-8",
+];
+
+/// The most that will be read out of one copy. A clipboard is not a file
+/// transfer, and the whole of it crosses the socket as one message.
+const MAX_CLIPBOARD: u64 = 1024 * 1024;
+
+/// The best of what a client is offering, or nothing when none of it is text.
+///
+/// Order matters: a client that offers both `text/plain` and the utf-8 spelling
+/// means the same bytes either way, but one that offers both and means different
+/// encodings is answering in whichever was asked for — so ask for the one whose
+/// encoding is not a guess.
+fn preferred_mime(offered: &[String]) -> Option<&'static str> {
+    TEXT_MIMES
+        .into_iter()
+        .find(|wanted| offered.iter().any(|have| have == wanted))
+}
+
 impl SelectionHandler for Webland {
     type SelectionUserData = ();
+
+    /// A client copied something. Read it, so the browser can have it too.
+    ///
+    /// The client writes into a pipe whenever it gets round to it, so the read
+    /// happens on a thread of its own — blocking the compositor on an
+    /// application's copy would stop every window on the desktop.
+    fn new_selection(
+        &mut self,
+        ty: SelectionTarget,
+        source: Option<SelectionSource>,
+        seat: Seat<Self>,
+    ) {
+        if ty != SelectionTarget::Clipboard && ty != SelectionTarget::Primary {
+            return;
+        }
+        let Some(source) = source else { return };
+        let Some(mime) = preferred_mime(&source.mime_types()) else {
+            return;
+        };
+        let Ok((reader, writer)) = std::io::pipe() else {
+            return;
+        };
+        let res = match ty {
+            SelectionTarget::Clipboard => {
+                request_data_device_client_selection::<Self>(&seat, mime.to_string(), writer.into())
+                    .is_ok()
+            }
+            SelectionTarget::Primary => {
+                request_primary_client_selection::<Self>(&seat, mime.to_string(), writer.into())
+                    .is_ok()
+            }
+        };
+        if !res {
+            return;
+        }
+        let copied = self.copied.clone();
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            if std::io::Read::read_to_string(
+                &mut std::io::Read::take(reader, MAX_CLIPBOARD),
+                &mut text,
+            )
+            .is_ok()
+            {
+                let _ = copied.send(text);
+            }
+        });
+    }
+
+    /// A client is pasting: hand it whatever the browser last had.
+    ///
+    /// On a thread for the same reason as the read — a client that asks for the
+    /// selection and then does not read the pipe would otherwise block the
+    /// compositor once the text outgrew the pipe's buffer.
+    fn send_selection(
+        &mut self,
+        ty: SelectionTarget,
+        _mime_type: String,
+        fd: std::os::fd::OwnedFd,
+        _seat: Seat<Self>,
+        (): &Self::SelectionUserData,
+    ) {
+        if ty != SelectionTarget::Clipboard && ty != SelectionTarget::Primary {
+            return;
+        }
+        let text = self.clipboard.clone();
+        std::thread::spawn(move || {
+            let mut pipe = std::fs::File::from(fd);
+            let _ = std::io::Write::write_all(&mut pipe, text.as_bytes());
+        });
+    }
 }
 
 impl DataDeviceHandler for Webland {
     fn data_device_state(&self) -> &DataDeviceState {
         &self.data_device_state
+    }
+}
+
+impl PrimarySelectionHandler for Webland {
+    fn primary_selection_state(&self) -> &PrimarySelectionState {
+        &self.primary_selection_state
     }
 }
 
@@ -426,6 +627,31 @@ fn toplevel_for(
         .cloned()
 }
 
+/// Put an X window at a size, or back to the browser's when there is none.
+fn configure_x11(state: &Webland, window: &X11Surface, size: Option<Size>) {
+    #[allow(clippy::cast_possible_wrap)]
+    let (width, height) = size.map_or(state.size, |size| {
+        (size.width.max(1) as i32, size.height.max(1) as i32)
+    });
+    if let Err(err) = window.configure(Rectangle::from_size((width, height).into())) {
+        tracing::warn!(%err, "could not configure an X11 window");
+    }
+}
+
+/// The X window a surface id names, if it came from X.
+fn x11_for_id(
+    state: &Webland,
+    known: &HashMap<ObjectId, Tracked>,
+    id: SurfaceId,
+) -> Option<X11Surface> {
+    let object = object_for(known, id)?;
+    state
+        .x11
+        .iter()
+        .find(|window| window.wl_surface().map(|s| s.id()) == Some(object.clone()))
+        .cloned()
+}
+
 /// Inject one browser-originated input event into the seat, targeting `surface`.
 fn inject_input(
     state: &mut Webland,
@@ -437,24 +663,82 @@ fn inject_input(
 ) {
     let serial = SERIAL_COUNTER.next_serial();
     match event {
-        InputEvent::PointerMotion { position } => {
+        InputEvent::PointerMotion { position, .. } => {
             // The browser points at a pixel of the image it was sent; the client
             // is owed a point in its own surface. Those differ by wherever the
             // image was cut from — nothing for a client sent its whole buffer,
             // the shadow margin for one that was cropped to its window, which is
             // a pointer landing a margin's width from where it was pointed.
             let (origin_x, origin_y) = image_origin(surface);
+            let location = Point::from((
+                position.x + f64::from(origin_x),
+                position.y + f64::from(origin_y),
+            ));
+            let dx = location.x - state.pointer_location.x;
+            let dy = location.y - state.pointer_location.y;
+            state.pointer_location = location;
             // The single surface sits at the origin: surface-local == compositor.
             pointer.motion(
                 state,
                 Some((surface.clone(), (0.0, 0.0).into())),
                 &MotionEvent {
-                    location: (position.x + f64::from(origin_x), position.y + f64::from(origin_y))
-                        .into(),
+                    location,
                     serial,
                     time,
                 },
             );
+            if dx != 0.0 || dy != 0.0 {
+                pointer.relative_motion(
+                    state,
+                    Some((surface.clone(), (0.0, 0.0).into())),
+                    &RelativeMotionEvent {
+                        delta: (dx, dy).into(),
+                        delta_unaccel: (dx, dy).into(),
+                        utime: u64::from(time) * 1000,
+                    },
+                );
+            }
+            pointer.frame(state);
+        }
+        InputEvent::PointerMotionRelative { dx, dy } => {
+            let is_locked = with_pointer_constraint(surface, pointer, |constraint| {
+                constraint
+                    .is_some_and(|c| c.is_active() && matches!(*c, PointerConstraint::Locked(_)))
+            });
+            if is_locked {
+                pointer.relative_motion(
+                    state,
+                    Some((surface.clone(), (0.0, 0.0).into())),
+                    &RelativeMotionEvent {
+                        delta: (dx, dy).into(),
+                        delta_unaccel: (dx, dy).into(),
+                        utime: u64::from(time) * 1000,
+                    },
+                );
+            } else {
+                let mut next = state.pointer_location;
+                next.x += dx;
+                next.y += dy;
+                state.pointer_location = next;
+                pointer.motion(
+                    state,
+                    Some((surface.clone(), (0.0, 0.0).into())),
+                    &MotionEvent {
+                        location: next,
+                        serial,
+                        time,
+                    },
+                );
+                pointer.relative_motion(
+                    state,
+                    Some((surface.clone(), (0.0, 0.0).into())),
+                    &RelativeMotionEvent {
+                        delta: (dx, dy).into(),
+                        delta_unaccel: (dx, dy).into(),
+                        utime: u64::from(time) * 1000,
+                    },
+                );
+            }
             pointer.frame(state);
         }
         InputEvent::PointerButton {
@@ -478,11 +762,42 @@ fn inject_input(
         } => {
             // The browser sends evdev codes; xkb keycodes are evdev + 8.
             let code: Keycode = (keycode + 8).into();
+            // Only when it actually changes. xkb refcounts a modifier's press,
+            // so a second `Down` for a key already held leaves the modifier set
+            // after the matching `Up` — and with no pressed key left to show for
+            // it, nothing can see it, let alone clear it. The result is a shift
+            // or a control that is on for the rest of the compositor's life:
+            // letters turn into chords the client answers with a shortcut, and
+            // return stops running the command in a terminal.
+            //
+            // Duplicates are ordinary, not exotic: the browser auto-repeats a
+            // held key, and it re-reports a modifier the page missed the release
+            // of. Neither is wanted — repeat is the client's own job, from the
+            // `wl_keyboard.repeat_info` it was given.
+            if keyboard.pressed_keys().contains(&code) == (press == Press::Down) {
+                return;
+            }
             keyboard.input::<(), _>(state, code, to_key_state(press), serial, time, |_, _, _| {
                 FilterResult::Forward
             });
         }
-        InputEvent::PointerScroll { dx, dy } => {
+        InputEvent::PointerScroll { dx, dy, .. } => {
+            // An axis event has no surface of its own: it goes wherever the
+            // pointer's focus is. A wheel turned over a window the pointer has
+            // not moved across since it was last raised — parked there, or over
+            // a window that just appeared underneath it — would otherwise land
+            // in whatever was focused before, so the focus is taken first.
+            if pointer.current_focus().as_ref() != Some(surface) {
+                pointer.motion(
+                    state,
+                    Some((surface.clone(), (0.0, 0.0).into())),
+                    &MotionEvent {
+                        location: state.pointer_location,
+                        serial,
+                        time,
+                    },
+                );
+            }
             // The browser sends pixels. Clients want both: the continuous value
             // for smooth scrolling, and v120 steps for the ones that only move
             // by whole notches — 120 being one notch, as the wheel protocol has
@@ -702,6 +1017,48 @@ fn host_layout() -> Option<String> {
         .find(|value| !value.is_empty())
 }
 
+/// The one output clients are told about: the browser's window.
+///
+/// A compositor with no `wl_output` is legal on the wire and useless in
+/// practice. GTK draws anyway, but `WebKit` asks GDK which monitor its window is
+/// on before it will composite, gets none, and never paints — a Tauri or GNOME
+/// Web window that loads and runs its page into a blank rectangle. The mode is
+/// whatever size the browser last reported, so a resize moves the monitor with
+/// it.
+fn browser_output(dh: &DisplayHandle, size: (i32, i32)) -> Output {
+    let output = Output::new(
+        String::from("webland"),
+        PhysicalProperties {
+            // Zero: there is no physical screen, and a made-up millimetre size
+            // would only give clients a false DPI to scale by.
+            size: (0, 0).into(),
+            subpixel: Subpixel::Unknown,
+            make: String::from("Webland"),
+            model: String::from("Browser"),
+        },
+    );
+    let _global = output.create_global::<Webland>(dh);
+    set_output_mode(&output, size);
+    output
+}
+
+/// Point the output at a new size, as a monitor changing mode.
+fn set_output_mode(output: &Output, (width, height): (i32, i32)) {
+    // 60 Hz in millihertz: a number clients divide by, not one anything here
+    // paces to — the browser's acks are the real clock.
+    let mode = Mode {
+        size: (width, height).into(),
+        refresh: 60_000,
+    };
+    output.change_current_state(
+        Some(mode),
+        Some(Transform::Normal),
+        Some(Scale::Integer(1)),
+        Some((0, 0).into()),
+    );
+    output.set_preferred(mode);
+}
+
 fn configured_size() -> (i32, i32) {
     std::env::var("WEBLAND_SIZE")
         .ok()
@@ -761,6 +1118,18 @@ struct Planes {
     modifier: u64,
     /// `(fd, offset, stride)`, one per plane.
     layout: Vec<(i32, u32, u32)>,
+}
+
+/// A window's current title, wherever it keeps one.
+///
+/// An X client sets `WM_NAME` on its X window rather than through `xdg_shell`,
+/// so the two have to be asked separately for the same answer.
+fn surface_title(state: &Webland, surface: &WlSurface) -> Option<String> {
+    if let Some(window) = state.x11_for(surface) {
+        let title = window.title();
+        return (!title.is_empty()).then_some(title);
+    }
+    toplevel_title(surface)
 }
 
 /// A toplevel's current title, as the client last set it.
@@ -1187,6 +1556,25 @@ fn drain_client(
                 // an arrow, whatever the client last asked for.
                 state.announce_cursor = true;
             }
+            ClientMessage::Clipboard { text } => {
+                // Handled here, in the drain, rather than with the input below:
+                // the paste keystroke is in this same batch and is injected
+                // after it, so the client asks for the selection only once the
+                // selection is the one the user meant.
+                state.clipboard = text;
+                set_data_device_selection(
+                    &state.dh.clone(),
+                    &state.seat.clone(),
+                    TEXT_MIMES.iter().map(|mime| (*mime).to_string()).collect(),
+                    (),
+                );
+                set_primary_selection(
+                    &state.dh.clone(),
+                    &state.seat.clone(),
+                    TEXT_MIMES.iter().map(|mime| (*mime).to_string()).collect(),
+                    (),
+                );
+            }
             ClientMessage::Focus { id } => {
                 state.focus = Some(id);
                 focus_changed = true;
@@ -1200,16 +1588,21 @@ fn drain_client(
     }
     if focus_changed {
         let focused = state.focus.and_then(|id| object_for(known, id));
-        dismiss_popups(state, focused);
+        dismiss_popups(state, focused.clone());
+        state.activate_x11(focused.as_ref());
     }
 
     for id in launching {
-        applications.launch(id, display);
+        applications.launch(id, display, state.xdisplay);
     }
 
     for id in closing {
         if let Some(toplevel) = toplevel_for(state, known, id) {
             toplevel.send_close();
+        } else if let Some(window) = x11_for_id(state, known, id)
+            && let Err(err) = window.close()
+        {
+            tracing::warn!(%err, "could not ask an X11 window to close");
         }
     }
 
@@ -1217,6 +1610,13 @@ fn drain_client(
     // redraws itself to fit. The shell only moves the window to the corner.
     for (id, size) in maximizing {
         let Some(toplevel) = toplevel_for(state, known, id) else {
+            // An X window is told a size and nothing else. `set_maximized`
+            // exists, but it sets a hint the client reads back — the size is
+            // what actually makes it redraw, and restoring means the size the
+            // browser is showing rather than one the client remembers.
+            if let Some(window) = x11_for_id(state, known, id) {
+                configure_x11(state, &window, size);
+            }
             continue;
         };
         toplevel.with_pending_state(|pending| {
@@ -1241,6 +1641,9 @@ fn drain_client(
     // client left flagged maximized would keep drawing as if it were.
     for (id, size) in sizing {
         let Some(toplevel) = toplevel_for(state, known, id) else {
+            if let Some(window) = x11_for_id(state, known, id) {
+                configure_x11(state, &window, Some(size));
+            }
             continue;
         };
         toplevel.with_pending_state(|pending| {
@@ -1261,6 +1664,8 @@ fn drain_client(
         let wanted = (size.width.max(1) as i32, size.height.max(1) as i32);
         if state.size != wanted {
             state.size = wanted;
+            set_output_mode(&state.output, wanted);
+            state.resize_x11();
             for toplevel in state.xdg_shell_state.toplevel_surfaces() {
                 toplevel.with_pending_state(|pending| {
                     pending.size = Some(wanted.into());
@@ -1272,32 +1677,72 @@ fn drain_client(
 
     // Input goes to the surface the browser raised; before it has raised
     // anything, to whichever surface exists.
+    //
+    // Over everything that is streamed, not over the toplevels: a popup and an
+    // X window are both surfaces the browser shows and the user clicks, and
+    // looking only where `xdg_shell` keeps its windows meant an X client was
+    // sent every frame and handed no click or keystroke back — Steam, and
+    // everything else that never grew a Wayland backend, drawn but dead.
     let focused = state.focus.and_then(|id| object_for(known, id));
-    let popup = state
-        .popups
+    let surfaces = streamed_surfaces(state);
+    let target = surfaces
         .iter()
-        .find(|popup| Some(popup.wl_surface().id()) == focused)
-        .map(|popup| popup.wl_surface().clone());
-    let toplevels = state.xdg_shell_state.toplevel_surfaces();
-    let target = popup.or_else(|| {
-        toplevels
-            .iter()
-            .find(|toplevel| Some(toplevel.wl_surface().id()) == focused)
-            .or_else(|| toplevels.first())
-            .map(|toplevel| toplevel.wl_surface().clone())
-    });
-    if !events.is_empty()
-        && let Some(surface) = target
+        .find(|surface| Some(surface.id()) == focused)
+        .or_else(|| surfaces.first())
+        .cloned();
+    if state.focus.is_none()
+        && let Some(surface) = &target
+        && let Some(tracked) = known.get(&surface.id())
     {
-        let now = start_time.elapsed().as_millis() as u32;
-        // Only when it actually changes: re-focusing what is already focused
-        // makes smithay resend `enter` and `modifiers` for nothing.
-        if keyboard.current_focus().as_ref() != Some(&surface) {
-            keyboard.set_focus(state, Some(surface.clone()), SERIAL_COUNTER.next_serial());
-        }
-        for event in events {
+        state.focus = Some(tracked.id);
+        state.activate_x11(Some(&surface.id()));
+    }
+    if events.is_empty() {
+        return;
+    }
+    let now = start_time.elapsed().as_millis() as u32;
+    // The keyboard follows the focus, and only when it actually changes:
+    // re-focusing what is already focused makes smithay resend `enter` and
+    // `modifiers` for nothing.
+    if let Some(surface) = &target
+        && keyboard.current_focus().as_ref() != Some(surface)
+    {
+        keyboard.set_focus(state, Some(surface.clone()), SERIAL_COUNTER.next_serial());
+    }
+    for event in events {
+        // The pointer follows the cursor. A motion or a wheel names the
+        // surface the browser delivered it to, which is the window under the
+        // cursor and not necessarily the focused one — sending it to the focus
+        // instead meant an unfocused window never saw `pointer.enter`, never
+        // highlighted anything under the cursor and never scrolled, while the
+        // focused one was silently pointed at coordinates from another window.
+        let surface = match pointer_surface(&event) {
+            Some(id) => {
+                let object = object_for(known, id);
+                surfaces
+                    .iter()
+                    .find(|surface| Some(surface.id()) == object)
+                    .cloned()
+            }
+            None => target.clone(),
+        };
+        // A surface the browser still holds and the compositor has already
+        // dropped: skip it rather than deliver it somewhere it was not aimed.
+        if let Some(surface) = surface {
             inject_input(state, pointer, keyboard, &surface, event, now);
         }
+    }
+}
+
+/// The surface a pointer event was delivered to, for the events that name one.
+///
+/// Buttons are absent on purpose: a `wl_pointer.button` has no surface of its
+/// own and goes to whatever the pointer's focus is, which the motion that put
+/// the cursor there has already set.
+fn pointer_surface(event: &InputEvent) -> Option<SurfaceId> {
+    match *event {
+        InputEvent::PointerMotion { id, .. } | InputEvent::PointerScroll { id, .. } => Some(id),
+        _ => None,
     }
 }
 
@@ -1322,6 +1767,8 @@ struct Tracked {
     /// Where a popup was last said to hang. A menu the client repositions keeps
     /// its size, so a size change alone would not notice one moving.
     anchor: Option<Anchor>,
+    /// Whether the surface has an active pointer lock constraint.
+    locked: bool,
 }
 
 /// Capture changed surfaces and emit their frames to the browser transport.
@@ -1344,6 +1791,12 @@ fn stream_dirty(
     if std::mem::take(&mut state.announce_applications) {
         emit(ServerMessage::Applications(applications.listing()));
     }
+    // Anything a client copied since the last pass. The browser puts it on the
+    // real clipboard, which is what makes a copy here paste anywhere else.
+    while let Ok(text) = state.pastes.try_recv() {
+        state.clipboard.clone_from(&text);
+        emit(ServerMessage::Clipboard { text });
+    }
     if std::mem::take(&mut state.announce_cursor) {
         emit(ServerMessage::Cursor {
             name: state.cursor.clone(),
@@ -1365,19 +1818,16 @@ fn stream_dirty(
     // down the same path a window is. What makes one a popup is where the
     // browser puts it, which is the anchor announced with it.
     state.popups.retain(PopupSurface::alive);
-    let mut toplevels: Vec<WlSurface> = state
-        .xdg_shell_state
-        .toplevel_surfaces()
-        .iter()
-        .map(|toplevel| toplevel.wl_surface().clone())
-        .collect();
-    toplevels.extend(state.popups.iter().map(|popup| popup.wl_surface().clone()));
+    let focused = state.focus.and_then(|id| object_for(known, id));
+    let toplevels = streamed_surfaces(state);
     for surface in &toplevels {
         // Read before the surface is tracked, because both want `known` and the
         // parent's id has to be in it already — it is, since a popup cannot be
         // mapped before the surface it hangs from.
         let anchor = popup_anchor(state, known, surface);
+        let mut is_new = false;
         let tracked = known.entry(surface.id()).or_insert_with(|| {
+            is_new = true;
             let id = SurfaceId(*next_surface_id);
             *next_surface_id += 1;
             Tracked {
@@ -1389,8 +1839,47 @@ fn stream_dirty(
                 clock: FrameClock::new(),
                 title: None,
                 anchor: None,
+                locked: false,
             }
         });
+        if is_new && anchor.is_none() {
+            state.focus = Some(tracked.id);
+            state.activate_x11(Some(&surface.id()));
+        }
+
+        if let Some(pointer) = state.seat.get_pointer() {
+            if focused.as_ref() == Some(&surface.id()) {
+                with_pointer_constraint(surface, &pointer, |constraint| {
+                    if let Some(c) = constraint
+                        && !c.is_active()
+                    {
+                        c.activate();
+                    }
+                });
+            } else {
+                with_pointer_constraint(surface, &pointer, |constraint| {
+                    if let Some(c) = constraint
+                        && c.is_active()
+                    {
+                        c.deactivate();
+                    }
+                });
+            }
+        }
+        let is_locked = state.seat.get_pointer().is_some_and(|pointer| {
+            with_pointer_constraint(surface, &pointer, |constraint| {
+                constraint
+                    .is_some_and(|c| c.is_active() && matches!(*c, PointerConstraint::Locked(_)))
+            })
+        });
+        if tracked.locked != is_locked {
+            tracked.locked = is_locked;
+            emit(ServerMessage::PointerConstraint {
+                id: tracked.id,
+                locked: is_locked,
+            });
+        }
+
         let commits = tree_commits(surface);
         if commits.is_empty() || (tracked.commits == commits && !keyframe) {
             continue;
@@ -1459,7 +1948,7 @@ fn stream_dirty(
         if announced {
             tracked.title = None;
         }
-        let title = toplevel_title(surface);
+        let title = surface_title(state, surface);
         if title.is_some() && tracked.title != title {
             tracked.title.clone_from(&title);
             if let Some(title) = title {
@@ -1575,6 +2064,9 @@ fn stream_dirty(
         let alive = live.contains(id);
         if !alive {
             emit(ServerMessage::SurfaceDestroyed { id: tracked.id });
+            if state.focus == Some(tracked.id) {
+                state.focus = None;
+            }
         }
         alive
     });
@@ -1595,6 +2087,27 @@ fn bitrate() -> i64 {
         .unwrap_or(8_000_000)
 }
 
+/// Every surface the browser is shown: windows, the menus they open, and the
+/// windows that came from X.
+///
+/// One list, because two things walk it — the capture that sends pixels and the
+/// frame clock that asks for the next ones — and a surface in one but not the
+/// other is a window that either freezes or is never drawn.
+fn streamed_surfaces(state: &Webland) -> Vec<WlSurface> {
+    let mut surfaces: Vec<WlSurface> = state
+        .xdg_shell_state
+        .toplevel_surfaces()
+        .iter()
+        .map(|toplevel| toplevel.wl_surface().clone())
+        .collect();
+    surfaces.extend(state.popups.iter().map(|popup| popup.wl_surface().clone()));
+    // An X window is a window like any other once it has a surface: captured,
+    // encoded and paced down the same path. Everything above it differs — it is
+    // configured in X and told to close in X — but none of that is pixels.
+    surfaces.extend(state.x11.iter().filter_map(X11Surface::wl_surface));
+    surfaces
+}
+
 /// Fire frame callbacks so every mapped client renders its next frame — but only
 /// when [`FrameClock`] says the browser is ready for one.
 fn tick_frame_callbacks(
@@ -1604,14 +2117,13 @@ fn tick_frame_callbacks(
 ) {
     let now = start_time.elapsed().as_millis() as u32;
     let at = std::time::Instant::now();
-    for surface in state.xdg_shell_state.toplevel_surfaces() {
-        let wl_surface = surface.wl_surface();
+    for surface in streamed_surfaces(state) {
         // A surface with no entry yet has never been captured, so nobody is
         // waiting on its frames; it gets one on the next pass.
-        if let Some(tracked) = known.get_mut(&wl_surface.id())
+        if let Some(tracked) = known.get_mut(&surface.id())
             && tracked.clock.should_tick(at)
         {
-            send_frames_surface_tree(wl_surface, now);
+            send_frames_surface_tree(&surface, now);
         }
     }
 }
@@ -1640,6 +2152,12 @@ pub fn run_winit(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut display: Display<Webland> = Display::new()?;
     let dh = display.handle();
+    // An event loop only for XWayland: smithay hands its X server and window
+    // manager over as calloop sources, and the compositor's own loop is a plain
+    // one. Pumped with a zero timeout each pass rather than run, so the shape of
+    // the main loop stays what it was.
+    let mut event_loop: EventLoop<'static, Webland> = EventLoop::try_new()?;
+    let xwayland_starting = xwayland::start(&event_loop.handle(), &dh);
 
     let compositor_state = CompositorState::new::<Webland>(&dh);
     let shm_state = ShmState::new::<Webland>(&dh, vec![]);
@@ -1655,10 +2173,14 @@ pub fn run_winit(
     // a picture the browser is never sent, so every application would be stuck
     // with the arrow the browser draws.
     let _cursor_shape = CursorShapeManagerState::new::<Webland>(&dh);
+    let relative_pointer_state = RelativePointerManagerState::new::<Webland>(&dh);
+    let pointer_constraints_state = PointerConstraintsState::new::<Webland>(&dh);
     let data_device_state = DataDeviceState::new::<Webland>(&dh);
+    let primary_selection_state = PrimarySelectionState::new::<Webland>(&dh);
     let mut seat_state = SeatState::new();
     let seat = seat_state.new_wl_seat(&dh, "winit");
 
+    let (copied, pastes) = std::sync::mpsc::channel();
     let mut state = Webland {
         compositor_state,
         xdg_shell_state,
@@ -1666,6 +2188,16 @@ pub fn run_winit(
         dmabuf_state,
         seat_state,
         data_device_state,
+        primary_selection_state,
+        _relative_pointer_state: relative_pointer_state,
+        _pointer_constraints_state: pointer_constraints_state,
+        pointer_location: Point::from((0.0, 0.0)),
+        output: browser_output(&dh, configured_size()),
+        xwayland_shell_state: XWaylandShellState::new::<Webland>(&dh),
+        xwm: None,
+        xdisplay: None,
+        xwayland_gone: false,
+        x11: Vec::new(),
         seat,
         keyframe: false,
         focus: None,
@@ -1674,6 +2206,10 @@ pub fn run_winit(
         server_decorated: HashSet::new(),
         requests: Vec::new(),
         popups: Vec::new(),
+        dh: dh.clone(),
+        clipboard: String::new(),
+        copied,
+        pastes,
         cursor: String::from("default"),
         announce_cursor: false,
     };
@@ -1696,11 +2232,21 @@ pub fn run_winit(
         .ok_or("listening socket has no name")?;
     tracing::info!(display = ?socket_name, "Webland compositor is up; point clients here");
 
+    // Before anything is launched: an X client reads `DISPLAY` once, at startup,
+    // and a client started before the X server would never see it. Skipped
+    // entirely when no X server was spawned, or the wait is a timeout nothing
+    // can end — five seconds of nothing on every machine without XWayland.
+    if xwayland_starting {
+        xwayland::wait_ready(&mut event_loop, &mut display, &mut state);
+    }
+
     if let Some(cmd) = std::env::var_os("WEBLAND_SPAWN") {
-        match std::process::Command::new(&cmd)
-            .env("WAYLAND_DISPLAY", &socket_name)
-            .spawn()
-        {
+        let mut spawn = std::process::Command::new(&cmd);
+        spawn.env("WAYLAND_DISPLAY", &socket_name);
+        if let Some(display_number) = state.xdisplay {
+            spawn.env("DISPLAY", format!(":{display_number}"));
+        }
+        match spawn.spawn() {
             Ok(_) => tracing::info!(command = ?cmd, "spawned client"),
             Err(err) => tracing::warn!(command = ?cmd, %err, "failed to spawn client"),
         }
@@ -1717,7 +2263,6 @@ pub fn run_winit(
     );
 
     let start_time = std::time::Instant::now();
-    let mut clients = Vec::new();
 
     // Maps each live surface to its announced id and last announced size.
     let mut known: HashMap<_, Tracked> = HashMap::new();
@@ -1809,13 +2354,16 @@ pub fn run_winit(
         tick_frame_callbacks(&state, &mut known, start_time);
 
         if let Some(stream) = listener.accept()? {
-            let client = display
+            // The handle is dropped: the display owns the connection, and the
+            // `Vec` these used to be pushed into only ever grew — one entry per
+            // client that had ever connected, live or long gone.
+            display
                 .handle()
                 .insert_client(stream, Arc::new(ClientState::default()))?;
-            clients.push(client);
         }
 
         display.dispatch_clients(&mut state)?;
+        event_loop.dispatch(Some(std::time::Duration::ZERO), &mut state)?;
         display.flush_clients()?;
 
         backend.submit(Some(&[damage])).unwrap();
@@ -1837,6 +2385,12 @@ pub fn run_headless(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut display: Display<Webland> = Display::new()?;
     let dh = display.handle();
+    // An event loop only for XWayland: smithay hands its X server and window
+    // manager over as calloop sources, and the compositor's own loop is a plain
+    // one. Pumped with a zero timeout each pass rather than run, so the shape of
+    // the main loop stays what it was.
+    let mut event_loop: EventLoop<'static, Webland> = EventLoop::try_new()?;
+    let xwayland_starting = xwayland::start(&event_loop.handle(), &dh);
 
     let compositor_state = CompositorState::new::<Webland>(&dh);
     let shm_state = ShmState::new::<Webland>(&dh, vec![]);
@@ -1877,10 +2431,14 @@ pub fn run_headless(
     // a picture the browser is never sent, so every application would be stuck
     // with the arrow the browser draws.
     let _cursor_shape = CursorShapeManagerState::new::<Webland>(&dh);
+    let relative_pointer_state = RelativePointerManagerState::new::<Webland>(&dh);
+    let pointer_constraints_state = PointerConstraintsState::new::<Webland>(&dh);
     let data_device_state = DataDeviceState::new::<Webland>(&dh);
+    let primary_selection_state = PrimarySelectionState::new::<Webland>(&dh);
     let mut seat_state = SeatState::new();
     let seat = seat_state.new_wl_seat(&dh, "webland");
 
+    let (copied, pastes) = std::sync::mpsc::channel();
     let mut state = Webland {
         compositor_state,
         xdg_shell_state,
@@ -1888,6 +2446,16 @@ pub fn run_headless(
         dmabuf_state,
         seat_state,
         data_device_state,
+        primary_selection_state,
+        _relative_pointer_state: relative_pointer_state,
+        _pointer_constraints_state: pointer_constraints_state,
+        pointer_location: Point::from((0.0, 0.0)),
+        output: browser_output(&dh, configured_size()),
+        xwayland_shell_state: XWaylandShellState::new::<Webland>(&dh),
+        xwm: None,
+        xdisplay: None,
+        xwayland_gone: false,
+        x11: Vec::new(),
         seat,
         keyframe: false,
         focus: None,
@@ -1896,6 +2464,10 @@ pub fn run_headless(
         server_decorated: HashSet::new(),
         requests: Vec::new(),
         popups: Vec::new(),
+        dh: dh.clone(),
+        clipboard: String::new(),
+        copied,
+        pastes,
         cursor: String::from("default"),
         announce_cursor: false,
     };
@@ -1918,11 +2490,21 @@ pub fn run_headless(
         .ok_or("listening socket has no name")?;
     tracing::info!(display = ?socket_name, "Webland compositor is up (headless); the browser is the display");
 
+    // Before anything is launched: an X client reads `DISPLAY` once, at startup,
+    // and a client started before the X server would never see it. Skipped
+    // entirely when no X server was spawned, or the wait is a timeout nothing
+    // can end — five seconds of nothing on every machine without XWayland.
+    if xwayland_starting {
+        xwayland::wait_ready(&mut event_loop, &mut display, &mut state);
+    }
+
     if let Some(cmd) = std::env::var_os("WEBLAND_SPAWN") {
-        match std::process::Command::new(&cmd)
-            .env("WAYLAND_DISPLAY", &socket_name)
-            .spawn()
-        {
+        let mut spawn = std::process::Command::new(&cmd);
+        spawn.env("WAYLAND_DISPLAY", &socket_name);
+        if let Some(display_number) = state.xdisplay {
+            spawn.env("DISPLAY", format!(":{display_number}"));
+        }
+        match spawn.spawn() {
             Ok(_) => tracing::info!(command = ?cmd, "spawned client"),
             Err(err) => tracing::warn!(command = ?cmd, %err, "failed to spawn client"),
         }
@@ -1938,17 +2520,20 @@ pub fn run_headless(
     );
 
     let start_time = std::time::Instant::now();
-    let mut clients = Vec::new();
     let mut known: HashMap<ObjectId, Tracked> = HashMap::new();
     let mut next_surface_id: u64 = 0;
     loop {
+        let pass_started = std::time::Instant::now();
         if let Some(stream) = listener.accept()? {
-            let client = display
+            // The handle is dropped: the display owns the connection, and the
+            // `Vec` these used to be pushed into only ever grew — one entry per
+            // client that had ever connected, live or long gone.
+            display
                 .handle()
                 .insert_client(stream, Arc::new(ClientState::default()))?;
-            clients.push(client);
         }
         display.dispatch_clients(&mut state)?;
+        event_loop.dispatch(Some(std::time::Duration::ZERO), &mut state)?;
 
         // An application installed or removed since the last pass: the browser
         // holds the listing, so it has to be told the new one.
@@ -1979,11 +2564,21 @@ pub fn run_headless(
         tick_frame_callbacks(&state, &mut known, start_time);
 
         display.flush_clients()?;
-        std::thread::sleep(std::time::Duration::from_millis(16));
+        // Sleep out what is left of the frame, not a whole frame on top of it.
+        // A flat 16ms made the pass cost 16ms *plus* dispatch, capture, encode
+        // and transport, so the desktop never reached 60Hz and every keystroke
+        // waited on a sleep that had nothing to do with it.
+        if let Some(rest) = FRAME_INTERVAL.checked_sub(pass_started.elapsed()) {
+            std::thread::sleep(rest);
+        }
     }
 }
 
+impl OutputHandler for Webland {}
+
 delegate_compositor!(Webland);
+delegate_output!(Webland);
+delegate_xwayland_shell!(Webland);
 delegate_xdg_shell!(Webland);
 delegate_xdg_decoration!(Webland);
 delegate_cursor_shape!(Webland);
@@ -1991,15 +2586,19 @@ delegate_shm!(Webland);
 delegate_dmabuf!(Webland);
 delegate_seat!(Webland);
 delegate_data_device!(Webland);
+delegate_primary_selection!(Webland);
+delegate_pointer_constraints!(Webland);
+delegate_relative_pointer!(Webland);
 
 #[cfg(test)]
 mod tests {
     use super::{
         FrameClock, IDLE_FRAME_INTERVAL, INITIAL_FRAME_CREDIT, MAX_FRAME_CREDIT, ancestry,
-        changed_region, clip, crop,
+        changed_region, clip, crop, pointer_surface, preferred_mime,
     };
     use std::time::{Duration, Instant};
-    use webland_core::{Rect, Size};
+    use webland_core::{Point, Rect, Size, SurfaceId};
+    use webland_protocol::{InputEvent, Press};
 
     fn rect(x: i32, y: i32, width: u32, height: u32) -> Rect {
         Rect {
@@ -2008,6 +2607,64 @@ mod tests {
             width,
             height,
         }
+    }
+
+    /// Motion and scroll go to the window the browser delivered them to;
+    /// everything else follows the keyboard focus. Routing all of it to the
+    /// focus meant hovering or scrolling an unfocused window moved the pointer
+    /// inside the focused one instead.
+    #[test]
+    fn only_motion_and_scroll_name_the_surface_they_go_to() {
+        let hovered = SurfaceId(4);
+        assert_eq!(
+            pointer_surface(&InputEvent::PointerMotion {
+                id: hovered,
+                position: Point { x: 3.0, y: 4.0 },
+            }),
+            Some(hovered)
+        );
+        assert_eq!(
+            pointer_surface(&InputEvent::PointerScroll {
+                id: hovered,
+                dx: 0.0,
+                dy: -120.0,
+            }),
+            Some(hovered)
+        );
+        // A button has no surface of its own in Wayland: it goes to the
+        // pointer's focus, which the motion above has already set. So do keys,
+        // and so does locked relative motion.
+        for event in [
+            InputEvent::PointerButton {
+                button: 0x110,
+                state: Press::Down,
+            },
+            InputEvent::Key {
+                keycode: 30,
+                state: Press::Down,
+            },
+            InputEvent::PointerMotionRelative { dx: 1.0, dy: 1.0 },
+        ] {
+            assert_eq!(pointer_surface(&event), None);
+        }
+    }
+
+    #[test]
+    fn preferred_mime_asks_for_text_and_nothing_else() {
+        let offers = |mimes: &[&str]| mimes.iter().map(|m| (*m).to_string()).collect::<Vec<_>>();
+        // The utf-8 spelling wins even when it is offered second.
+        assert_eq!(
+            preferred_mime(&offers(&["text/plain", "text/plain;charset=utf-8"])),
+            Some("text/plain;charset=utf-8")
+        );
+        assert_eq!(preferred_mime(&offers(&["text/plain"])), Some("text/plain"));
+        // A copied image or file list is not something to put on the clipboard
+        // of a browser, so nothing is asked for at all.
+        assert_eq!(
+            preferred_mime(&offers(&["image/png", "text/uri-list"])),
+            None
+        );
+        assert_eq!(preferred_mime(&[]), None);
     }
 
     #[test]
