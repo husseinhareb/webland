@@ -4,8 +4,6 @@
 //! could advertise through `linux-dmabuf-v1`. If this fails there is no point
 //! wiring the global, so it is worth its twenty lines before the three hundred.
 
-#![allow(unsafe_code)] // EGLDisplay::new is unsafe; see the SAFETY note below.
-
 use std::fs::File;
 
 use smithay::backend::allocator::gbm::GbmDevice;
@@ -21,6 +19,7 @@ fn main() {
         .unwrap_or_else(|e| panic!("open {path}: {e}"));
     let gbm = GbmDevice::new(file).expect("gbm device");
     // SAFETY: `gbm` outlives the display; we never hand its fd to anything else.
+    #[allow(unsafe_code)]
     let egl = unsafe { EGLDisplay::new(gbm) }.expect("egl display");
 
     println!("{path}: EGL up");
