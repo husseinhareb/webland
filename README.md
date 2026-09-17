@@ -27,7 +27,6 @@ order of work.
 | `frontend/` | Rust + Leptos browser desktop, compiled to WebAssembly with Trunk |
 | `shared/protocol/` | Language-neutral protocol definition |
 | `docs/` | Architecture notes and roadmap |
-| `scripts/` | Development helpers |
 
 ## Development
 
@@ -49,8 +48,11 @@ cd backend && cargo run -p webland-server
 # frontend
 cd frontend && trunk serve
 
-# both
-./scripts/dev.sh
+# both (dev)
+./.run.sh
+
+# both (release - optimized)
+./.run.sh release
 ```
 
 The compositor binds its own `wayland-N` socket and logs the name. Without
@@ -73,9 +75,6 @@ browser decodes them with WebCodecs and draws the result on a 2D canvas, and
 sends pointer, keyboard and wheel input back. Frames are paced by the browser,
 so clients redraw at its rate rather than into a growing queue.
 
-(There is a `wgpu` renderer in `frontend/src/gpu`, but nothing constructs it —
-it is parked until the WebGPU path is worth switching on.)
-
 A client that hands over a dmabuf never has its pixels copied: the buffer is
 imported as `DRM_PRIME`, mapped to a VA-API surface and encoded from the memory
 the client rendered into. `wl_shm` clients have no GPU buffer to import, so they
@@ -85,7 +84,7 @@ at all. Run headless — the browser is the only display:
 
 ```sh
 # both halves; browser is the only display, with a client to show
-WEBLAND_SPAWN=kitty ./scripts/dev.sh
+WEBLAND_SPAWN=kitty ./.run.sh
 # then open http://127.0.0.1:3030
 ```
 
@@ -143,6 +142,13 @@ treatment: the shell leaves its own titlebar off and forwards their move,
 maximize and minimize requests to the browser, so the client's own bar drives
 the same window management the shell's would have.
 
+The clipboard crosses in both directions. A copy inside a client is read out of
+its selection and put on the browser's clipboard, so it pastes anywhere on the
+machine; a paste hands the browser's clipboard back, carried by the browser's own
+`paste` event — the one way a page is given the clipboard without asking for a
+permission first. Text only: an image or a file list is a copy the browser has no
+way to take.
+
 The pointer is the client's to name: `wp_cursor_shape_manager_v1` gets a shape
 by name, and the names it uses are CSS's names, so what the client asked for
 goes straight onto the canvas — an I-beam over text, a hand over a link, nothing
@@ -172,6 +178,11 @@ Firefox  = firefox --new-instance
 Chromium = chromium --user-data-dir=~/.webland/chromium
 ```
 
+The name on the left need not be the entry's whole `Name=`: any part of it will
+do, as will the `.desktop` file's own name, so `Firefox` finds the entry that
+calls itself `Firefox Web Browser`. Commands are quoted as a shell would quote
+them, so a path with a space in it goes in quotes: `--profile "~/My Profiles"`.
+
 ### Reaching it from another machine
 
 The page derives its WebSocket URL from wherever it is served, so any reverse
@@ -183,6 +194,7 @@ secure-context API, and over plain `http` to anything but localhost it is
 sudo tailscale serve --bg --https=443 http://127.0.0.1:7681
 ```
 
-Linux-first and Wayland-first. Xorg is not a target; X11 applications would be
-handled through XWayland later, if at all.
+Linux-first and Wayland-first. Xorg is not a target, but X11 applications are:
+they run through XWayland, which the compositor starts and manages itself, and
+reach the browser as surfaces indistinguishable from Wayland ones.
 

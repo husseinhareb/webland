@@ -8,7 +8,7 @@ webland-compositor   (Rust, smithay)
 webland-server       (Rust, hosts the compositor, speaks the protocol)
     ↓ Webland protocol (WebSocket first, WebTransport later)
 frontend             (Rust, Leptos → WebAssembly)
-    ↓ WebGPU
+    ↓ 2D canvas (WebGPU later)
 user's display
 ```
 
@@ -25,21 +25,25 @@ user's display
 
 | Module | Responsibility |
 | --- | --- |
-| `desktop/` | Shell UI: panels, dock, launcher, settings, notifications |
-| `compositor/` | Places application surfaces in the desktop scene |
+| `desktop/` | Shell UI: panel, launcher, window chrome, notifications |
+| `scene/` | The window list, and everything the shell changes about it |
+| `compositor/` | Draws a surface's frames into its canvas |
 | `decode/` | WebCodecs H.264 decode, configured from the stream's own SPS |
-| `gpu/` | WebGPU device and render pipelines |
 | `input/` | Browser events to Wayland input, including modifier reconciliation |
 | `latency/` | Click-to-photon timing, the number Phase 3 is judged on |
-| `protocol/` | Transport seam and codec |
+| `protocol/` | Transport, over the shared `webland-protocol` codec |
+
+Each module's `mod.rs` declares its files and re-exports; the code is in the
+files beside it.
 
 ## Decisions
 
 The reasoning behind these, and the order they get built in, is in
 [roadmap.md](roadmap.md).
 
-- **Wayland only.** Xorg is not a target. X11 clients would arrive via XWayland
-  behind a feature flag, if ever.
+- **Wayland first.** Xorg is not a target as a display server. X11 clients
+  arrive via XWayland, which the compositor starts and window-manages; from the
+  protocol down they are surfaces like any other.
 - **Transport is replaceable.** The protocol is defined over framed binary
   messages; WebSocket is an implementation detail, not part of the contract.
 - **The frontend is Rust + Leptos**, compiled to WebAssembly with Trunk. The
