@@ -1,15 +1,15 @@
 //! WebSocket transport, browser side.
 //!
-//! Implements the [`Transport`] seam over `web_sys::WebSocket`, moving
-//! `webland-protocol` frames as binary messages. Callers turn typed messages
-//! into frames with `webland_protocol::{encode, decode}` — the same codec the
-//! backend runs.
+//! Moves `webland-protocol` frames over `web_sys::WebSocket` as binary messages.
+//! Callers turn typed messages into frames with `webland_protocol::{encode,
+//! decode}` — the same codec the backend runs.
+//!
+//! Frames are opaque bytes here; WebTransport would be a second type with the
+//! same four methods, and nothing below assumes a socket beyond that.
 
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use web_sys::{BinaryType, MessageEvent, WebSocket};
-
-use super::Transport;
 
 /// A browser-side WebSocket carrying protocol frames.
 #[derive(Debug)]
@@ -28,15 +28,15 @@ impl WebSocketTransport {
         socket.set_binary_type(BinaryType::Arraybuffer);
         Ok(Self { socket })
     }
-}
 
-impl Transport for WebSocketTransport {
-    fn send(&self, frame: &[u8]) {
+    /// Put a frame on the wire.
+    pub fn send(&self, frame: &[u8]) {
         // A dropped frame surfaces later as a closed socket; nothing to do here.
         let _ = self.socket.send_with_u8_array(frame);
     }
 
-    fn on_message(&self, handler: Box<dyn Fn(Vec<u8>)>) {
+    /// Run `handler` for every frame that arrives.
+    pub fn on_message(&self, handler: Box<dyn Fn(Vec<u8>)>) {
         let closure = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
             if let Ok(buffer) = event.data().dyn_into::<js_sys::ArrayBuffer>() {
                 handler(js_sys::Uint8Array::new(buffer.as_ref()).to_vec());
@@ -48,12 +48,6 @@ impl Transport for WebSocketTransport {
         closure.forget();
     }
 
-    fn close(&self) {
-        let _ = self.socket.close();
-    }
-}
-
-impl WebSocketTransport {
     /// Run `handler` once the socket opens.
     pub fn on_open(&self, handler: Box<dyn Fn()>) {
         let closure = Closure::<dyn FnMut(web_sys::Event)>::new(move |_event| handler());
