@@ -168,12 +168,37 @@ pub enum Press {
 /// The keyboard shape is intentionally minimal: xkb keymaps, key repeat and IME
 /// are Phase 3 problems, not Phase 0 ones. `keycode` is a raw evdev code, the
 /// unit the compositor ultimately needs.
+///
+/// Motion and scroll name the surface they landed on, and nothing else does.
+/// That is the split Wayland already makes: the pointer goes where it is
+/// pointed, and the keyboard goes where the focus is — while buttons and wheel
+/// notches follow the pointer's own focus, which the surface below establishes.
+/// Without the id every one of these went to the focused window, so hovering or
+/// scrolling an unfocused one moved the pointer inside the focused one instead.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum InputEvent {
-    PointerMotion { position: Point },
-    PointerButton { button: u32, state: Press },
-    PointerScroll { dx: f64, dy: f64 },
-    Key { keycode: u32, state: Press },
+    /// `position` is in the named surface's own pixels.
+    PointerMotion {
+        id: SurfaceId,
+        position: Point,
+    },
+    PointerMotionRelative {
+        dx: f64,
+        dy: f64,
+    },
+    PointerButton {
+        button: u32,
+        state: Press,
+    },
+    PointerScroll {
+        id: SurfaceId,
+        dx: f64,
+        dy: f64,
+    },
+    Key {
+        keycode: u32,
+        state: Press,
+    },
 }
 
 /// Backend → browser. One of the two server-originated messages.
@@ -202,6 +227,16 @@ pub enum ServerMessage {
         id: SurfaceId,
         request: WindowRequest,
     },
+    /// A client put this text on the clipboard; the browser should too, so a
+    /// copy inside webland can be pasted anywhere on the machine.
+    Clipboard {
+        text: String,
+    },
+    /// A surface has requested or released a pointer lock constraint (e.g. Minecraft in-game).
+    PointerConstraint {
+        id: SurfaceId,
+        locked: bool,
+    },
     /// What the pointer should look like over a client's surface.
     ///
     /// The name is a CSS cursor keyword, which is also the XDG cursor name the
@@ -225,7 +260,7 @@ pub enum ServerMessage {
 }
 
 /// Browser → backend. Input plus the frame-pacing ack.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ClientMessage {
     /// Input on its way to a Wayland client.
     Input(InputEvent),
@@ -244,6 +279,12 @@ pub enum ClientMessage {
     /// is the one part it must know, because there is a single seat and somebody
     /// has to receive the keystrokes.
     Focus { id: SurfaceId },
+    /// The browser's clipboard, as of the paste the user just asked for.
+    ///
+    /// Sent on the paste rather than whenever the clipboard changes, because a
+    /// page cannot read a clipboard it was not handed: the paste event is the
+    /// browser handing it over, and needs no permission to do it.
+    Clipboard { text: String },
     /// Start the application with this id, as the launcher does.
     Launch { id: u32 },
     /// Ask the surface's client to close, as a window button does.
@@ -339,10 +380,25 @@ mod tests {
     #[test]
     fn client_input_round_trips() {
         let msg = ClientMessage::Input(InputEvent::PointerMotion {
+            id: SurfaceId(3),
             position: Point { x: 12.0, y: 34.0 },
         });
         let frame = encode(&msg).unwrap();
         assert_eq!(msg, decode::<ClientMessage>(&frame).unwrap());
+
+        let rel = ClientMessage::Input(InputEvent::PointerMotionRelative {
+            dx: -5.5,
+            dy: 10.25,
+        });
+        let frame = encode(&rel).unwrap();
+        assert_eq!(rel, decode::<ClientMessage>(&frame).unwrap());
+
+        let constraint = ServerMessage::PointerConstraint {
+            id: SurfaceId(42),
+            locked: true,
+        };
+        let frame = encode(&constraint).unwrap();
+        assert_eq!(constraint, decode::<ServerMessage>(&frame).unwrap());
     }
 
     /// The resize grip's message carries a size, and a variant added after
@@ -365,6 +421,42 @@ mod tests {
             size: Some(size),
         };
         assert_ne!(frame, encode(&maximized).unwrap());
+    }
+
+    /// Pointer motion and scroll carry the surface they landed on, so the
+    /// compositor can deliver them to the window under the pointer rather than
+    /// to whichever one holds the keyboard.
+    #[test]
+    fn pointer_events_name_their_surface() {
+        for msg in [
+            ClientMessage::Input(InputEvent::PointerMotion {
+                id: SurfaceId(9),
+                position: Point { x: 1.0, y: 2.0 },
+            }),
+            ClientMessage::Input(InputEvent::PointerScroll {
+                id: SurfaceId(9),
+                dx: 0.0,
+                dy: -120.0,
+            }),
+        ] {
+            assert_eq!(
+                msg,
+                decode::<ClientMessage>(&encode(&msg).unwrap()).unwrap()
+            );
+        }
+        // Two windows, one gesture: the ids have to survive the wire, or the
+        // routing they exist for reads the same for both.
+        let a = ClientMessage::Input(InputEvent::PointerScroll {
+            id: SurfaceId(1),
+            dx: 0.0,
+            dy: 8.0,
+        });
+        let b = ClientMessage::Input(InputEvent::PointerScroll {
+            id: SurfaceId(2),
+            dx: 0.0,
+            dy: 8.0,
+        });
+        assert_ne!(encode(&a).unwrap(), encode(&b).unwrap());
     }
 
     #[test]

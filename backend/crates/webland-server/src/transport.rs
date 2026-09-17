@@ -92,14 +92,20 @@ pub async fn bind(addr: SocketAddr) -> std::io::Result<TcpListener> {
     TcpListener::bind(addr).await
 }
 
-/// Accept one browser, upgrade it to WebSocket, and return a [`Connection`].
+/// Upgrade an accepted socket to WebSocket and return a [`Connection`].
 ///
 /// Spawns a reader task (frame → `decode` → incoming) and a writer task
 /// (outgoing → `encode` → frame).
-pub async fn accept(
-    listener: &TcpListener,
+///
+/// Separate from accepting the socket because the handshake waits on the peer:
+/// it is the peer's HTTP request that is being read. Run inline in the accept
+/// loop, one connection that never sends that request — a port scanner, a proxy
+/// probe, a browser on a stalled network — holds the loop open and no other
+/// browser can connect at all.
+async fn upgrade(
+    stream: tokio::net::TcpStream,
+    peer: SocketAddr,
 ) -> Result<Connection, Box<dyn std::error::Error + Send + Sync>> {
-    let (stream, peer) = listener.accept().await?;
     let ws = tokio_tungstenite::accept_async(stream).await?;
     tracing::info!(%peer, "browser connected");
     let (mut writer, mut reader) = ws.split();
@@ -177,52 +183,65 @@ pub fn spawn_server(
                 tracing::info!(%addr, "websocket transport listening");
 
                 loop {
-                    match accept(&listener).await {
-                        Ok(mut connection) => {
-                            let mut frames = sink.subscribe();
-                            let client_tx = client.clone();
-                            tokio::spawn(async move {
-                                loop {
-                                    tokio::select! {
-                                        incoming = connection.recv() => match incoming {
-                                            // The ack both releases a withheld
-                                            // frame here and credits the
-                                            // compositor's frame clock.
-                                            Some(ClientMessage::FramePresented { id }) => {
-                                                let _ =
-                                                    client_tx.send(ClientMessage::FramePresented { id });
-                                            }
-                                            Some(message) => {
-                                                let _ = client_tx.send(message);
-                                            }
-                                            None => break,
-                                        },
-                                        frame = frames.recv() => match frame {
-                                            Ok(message) => {
-                                                if !connection.send(message) {
-                                                    break;
-                                                }
-                                            }
-                                            // The broadcast queue overflowed and
-                                            // frames were lost. The decoder is
-                                            // now applying deltas against a
-                                            // reference it never received, so
-                                            // ask for a keyframe rather than let
-                                            // it render nonsense until the next
-                                            // one happens along.
-                                            Err(broadcast::error::RecvError::Lagged(dropped)) => {
-                                                tracing::warn!(dropped, "browser fell behind; resyncing");
-                                                let _ = client_tx.send(ClientMessage::RequestKeyframe);
-                                            }
-                                            Err(broadcast::error::RecvError::Closed) => break,
-                                        },
-                                    }
-                                }
-                                tracing::info!("browser disconnected");
-                            });
+                    let (stream, peer) = match listener.accept().await {
+                        Ok(accepted) => accepted,
+                        Err(err) => {
+                            tracing::warn!(%err, "websocket accept failed");
+                            continue;
                         }
-                        Err(err) => tracing::warn!(%err, "websocket accept failed"),
-                    }
+                    };
+                    // Handshake and serve on a task of their own, so the next
+                    // browser is accepted while this one is still upgrading.
+                    let sink = sink.clone();
+                    let client_tx = client.clone();
+                    tokio::spawn(async move {
+                        let mut connection = match upgrade(stream, peer).await {
+                            Ok(connection) => connection,
+                            Err(err) => {
+                                tracing::warn!(%err, %peer, "websocket handshake failed");
+                                return;
+                            }
+                        };
+                        // Subscribed once there is somewhere to put the frames:
+                        // a subscription nobody reads from fills up and reports
+                        // a lag that costs everyone a keyframe.
+                        let mut frames = sink.subscribe();
+                        loop {
+                            tokio::select! {
+                                incoming = connection.recv() => match incoming {
+                                    // The ack both releases a withheld frame
+                                    // here and credits the compositor's frame
+                                    // clock.
+                                    Some(ClientMessage::FramePresented { id }) => {
+                                        let _ = client_tx.send(ClientMessage::FramePresented { id });
+                                    }
+                                    Some(message) => {
+                                        let _ = client_tx.send(message);
+                                    }
+                                    None => break,
+                                },
+                                frame = frames.recv() => match frame {
+                                    Ok(message) => {
+                                        if !connection.send(message) {
+                                            break;
+                                        }
+                                    }
+                                    // The broadcast queue overflowed and frames
+                                    // were lost. The decoder is now applying
+                                    // deltas against a reference it never
+                                    // received, so ask for a keyframe rather
+                                    // than let it render nonsense until the
+                                    // next one happens along.
+                                    Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                                        tracing::warn!(dropped, "browser fell behind; resyncing");
+                                        let _ = client_tx.send(ClientMessage::RequestKeyframe);
+                                    }
+                                    Err(broadcast::error::RecvError::Closed) => break,
+                                },
+                            }
+                        }
+                        tracing::info!(%peer, "browser disconnected");
+                    });
                 }
             });
         });
@@ -234,10 +253,17 @@ pub fn spawn_server(
 
 #[cfg(test)]
 mod tests {
-    use super::{FrameSink, accept, bind};
+    use super::{Connection, FrameSink, bind, mpsc, spawn_server, upgrade};
     use futures_util::{SinkExt, StreamExt};
+    use tokio::net::TcpListener;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
     use webland_core::{Point, Rect, Size, SurfaceId};
+
+    /// Accept one connection and finish its handshake, as the server loop does.
+    async fn accept(listener: &TcpListener) -> Connection {
+        let (stream, peer) = listener.accept().await.unwrap();
+        upgrade(stream, peer).await.unwrap()
+    }
     use webland_protocol::{
         ClientMessage, InputEvent, ServerMessage, SurfaceCreated, decode, encode,
     };
@@ -271,13 +297,50 @@ mod tests {
 
     // A real loopback round-trip over TCP + WebSocket, exercising the codec on
     // both ends exactly as the browser will.
+    /// A peer that opens a socket and never sends its HTTP request must not
+    /// keep the next browser out. The silent socket is left dangling on
+    /// purpose: it is exactly what a port scanner or a half-open proxy probe
+    /// leaves behind, and the accept loop used to sit in `accept_async` on it.
+    ///
+    /// Against the real [`spawn_server`], because the loop is the thing being
+    /// tested. The port is one the kernel just handed out and we let go of
+    /// again, which is as close to reserving one as a test can get.
+    #[tokio::test]
+    async fn a_silent_peer_does_not_block_the_next_browser() {
+        let addr = {
+            let scratch = bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+            scratch.local_addr().unwrap()
+        };
+        let (client_tx, _client_rx) = mpsc::unbounded_channel();
+        spawn_server(addr, FrameSink::new(), client_tx);
+
+        // The server binds on a thread of its own; wait for the port to answer.
+        let silent = loop {
+            if let Ok(stream) = tokio::net::TcpStream::connect(addr).await {
+                break stream;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+
+        let connected = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio_tungstenite::connect_async(format!("ws://{addr}")),
+        )
+        .await;
+        assert!(
+            connected.is_ok_and(|result| result.is_ok()),
+            "a browser could not connect behind a peer that never handshakes"
+        );
+        drop(silent);
+    }
+
     #[tokio::test]
     async fn frames_round_trip_over_websocket() {
         let listener = bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = tokio::spawn(async move {
-            let mut connection = accept(&listener).await.unwrap();
+            let mut connection = accept(&listener).await;
             let input = connection.recv().await.unwrap();
             connection.send(ServerMessage::SurfaceCreated(SurfaceCreated {
                 id: SurfaceId(7),
@@ -292,7 +355,7 @@ mod tests {
                     height: 1080,
                 },
                 parent: None,
-            decorated: true,
+                decorated: true,
             }));
             input
         });
@@ -302,6 +365,7 @@ mod tests {
             .unwrap();
 
         let sent = ClientMessage::Input(InputEvent::PointerMotion {
+            id: SurfaceId(7),
             position: Point { x: 1.0, y: 2.0 },
         });
         ws.send(WsMessage::Binary(encode(&sent).unwrap()))
