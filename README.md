@@ -1,36 +1,43 @@
 # Webland
 
-A Wayland compositor that uses a browser as its display, streaming each window
-separately so the browser does the compositing.
+A Wayland compositor that uses a browser as its display. Every window is
+streamed as its own video and the browser composites them.
 
-Linux applications talk Wayland to a Rust backend, which encodes each surface to
-H.264 on the GPU and sends it over the Webland protocol to a browser frontend
-that decodes it with WebCodecs and draws it on a 2D canvas, one canvas per
-window. The frontend is written in Rust with Leptos and compiled to WebAssembly,
-so it shares the protocol crate with the backend.
+Linux applications talk Wayland to a Rust backend. The backend encodes each
+surface to H.264 on the GPU and sends it over a WebSocket to a frontend written
+in Rust with Leptos and compiled to WebAssembly. The frontend decodes with
+WebCodecs and draws every window into its own 2D canvas. Both halves link the
+same protocol crate, so the wire format cannot drift.
 
-Streaming per surface rather than per screen is what makes the shell cheap: the
-browser already holds every window, so moving, stacking and minimizing one are
-local and send nothing at all.
+Streaming per surface instead of per screen is what keeps the shell cheap. The
+browser already holds every window, so moving, stacking, minimizing and
+switching workspaces happen locally and send nothing at all.
 
-**Status: the desktop runs.** Zero-copy dmabuf to VA-API to WebCodecs, a
-browser-driven frame clock, and a shell with window chrome, a panel, a launcher
-and workspaces. Notifications, menus and settings do not exist yet, and the
-protocol is unauthenticated. See [docs/roadmap.md](docs/roadmap.md) for the
-order of work.
+## Status
+
+The desktop runs. Zero-copy dmabuf to VA-API to WebCodecs, a frame clock driven
+by the browser, and a shell with window chrome, a panel, a launcher, four
+workspaces, Alt+Tab, edge snapping and a shared clipboard. X11 applications work
+through XWayland, which the compositor starts and manages itself.
+
+Not there yet: application notifications (no D-Bus daemon), a settings UI, and
+authentication. The protocol has no auth at all, so bind it to localhost and put
+a proxy in front if you want it elsewhere. [docs/roadmap.md](docs/roadmap.md)
+has the order of work, [docs/architecture.md](docs/architecture.md) the shape of
+the code.
 
 ## Layout
 
 | Path | What lives here |
 | --- | --- |
 | `backend/` | Rust workspace: compositor, server, protocol, shared core |
-| `frontend/` | Rust + Leptos browser desktop, compiled to WebAssembly with Trunk |
+| `frontend/` | Rust and Leptos browser desktop, built to WebAssembly with Trunk |
 | `shared/protocol/` | Language-neutral protocol definition |
 | `docs/` | Architecture notes and roadmap |
 
-## Development
+## Building and running
 
-The frontend compiles to WebAssembly, so it needs the `wasm32-unknown-unknown`
+The frontend compiles to WebAssembly, so you need the `wasm32-unknown-unknown`
 target plus `trunk` and a matching `wasm-bindgen`.
 
 ```sh
@@ -41,160 +48,161 @@ sudo pacman -S rust-wasm trunk wasm-bindgen
 rustup target add wasm32-unknown-unknown && cargo install trunk
 ```
 
+`.run.sh` drives both halves:
+
 ```sh
-# backend
-cd backend && cargo run -p webland-server
-
-# frontend
-cd frontend && trunk serve
-
-# both (dev)
-./.run.sh
-
-# both (release - optimized)
-./.run.sh release
+./.run.sh            # dev: backend + trunk serve, debug build
+./.run.sh release    # build both in release, then run them
+./.run.sh build      # release build only
+./.run.sh run        # run release artifacts without rebuilding
+./.run.sh check      # fmt, clippy and tests for both halves, plus a wasm build
 ```
 
-The compositor binds its own `wayland-N` socket and logs the name. Without
-`WEBLAND_HEADLESS` it also opens a winit window on your existing desktop, which
-is useful as a visual ground truth. Point a client at it, or have it spawn one:
+Then open http://127.0.0.1:3030. The page serves the protocol socket from its
+own origin at `/ws`, proxied to the backend, so only one port ever has to be
+reachable.
+
+The compositor binds its own `wayland-N` socket and logs the name. Point a
+client at it, or have it spawn one:
 
 ```sh
-# spawn a client automatically (any Wayland app)
-WEBLAND_SPAWN=weston-terminal cargo run -p webland-server
+# spawn a client with the desktop
+WEBLAND_SPAWN=kitty ./.run.sh
 
 # or connect one yourself to the socket it prints
-cargo run -p webland-server        # logs e.g. display="wayland-2"
+cargo run --manifest-path backend/Cargo.toml -p webland-server   # logs display="wayland-2"
 WAYLAND_DISPLAY=wayland-2 weston-terminal
 ```
 
-### Phase 2/3: surfaces into the browser, and input back
+Both dmabuf and `wl_shm` clients work. A client that hands over a dmabuf never
+has its pixels copied: the buffer is imported as `DRM_PRIME`, mapped to a VA-API
+surface and encoded straight out of the memory the client rendered into.
+`wl_shm` clients have no GPU buffer to import, so they get uploaded instead, and
+fall back to a deflated damage rectangle diffed against what the browser already
+holds if the encoder cannot take the surface at all.
 
-Surfaces are encoded to H.264 on the GPU and streamed over a WebSocket; the
-browser decodes them with WebCodecs and draws the result on a 2D canvas, and
-sends pointer, keyboard and wheel input back. Frames are paced by the browser,
-so clients redraw at its rate rather than into a growing queue.
+If the zero-copy path is not being taken, `--example gpu_probe` says whether EGL
+comes up on the render node at all.
 
-A client that hands over a dmabuf never has its pixels copied: the buffer is
-imported as `DRM_PRIME`, mapped to a VA-API surface and encoded from the memory
-the client rendered into. `wl_shm` clients have no GPU buffer to import, so they
-are uploaded instead, and fall back to a deflated damage rectangle — diffed
-against what the browser already holds — if the encoder cannot take the surface
-at all. Run headless — the browser is the only display:
+### Environment
 
-```sh
-# both halves; browser is the only display, with a client to show
-WEBLAND_SPAWN=kitty ./.run.sh
-# then open http://127.0.0.1:3030
-```
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `WEBLAND_HEADLESS` | `1` from `.run.sh` | Unset it to also open a winit window on your existing desktop, useful as visual ground truth |
+| `WEBLAND_SPAWN` | none | Client to start with the compositor |
+| `WEBLAND_SIZE` | `1280x800` | Size clients are configured at |
+| `WEBLAND_PORT` | `3030` | Port the page is served on |
+| `WEBLAND_WS` | `127.0.0.1:9001` | Address the protocol socket binds to |
+| `WEBLAND_RENDER_NODE` | `/dev/dri/renderD128` | GPU to encode on |
+| `WEBLAND_BITRATE` | 8 Mbit/s | Encoder ceiling for the worst case |
+| `WEBLAND_LAYOUT`, `WEBLAND_VARIANT` | host layout | xkb keyboard layout, since the browser only reports physical key positions |
 
-Both dmabuf and `wl_shm` clients work (`kitty`, `weston-terminal`). Unset
-`WEBLAND_HEADLESS` to also get a local winit window as a debugging ground-truth,
-`WEBLAND_SIZE=WxH` changes the size clients are configured at,
-`WEBLAND_RENDER_NODE` picks a different GPU, and `WEBLAND_BITRATE` sets the
-encoder ceiling. If the zero-copy path is not being taken, `--example gpu_probe`
-says whether EGL comes up on the render node at all.
-
-Phase 2 is measured, not felt (`docs/roadmap.md`), so the wire cost has its own
-client — it connects exactly as the browser does and reports the rate:
-
-```sh
-cargo run --release --manifest-path backend/Cargo.toml \
-  -p webland-server --example measure -- 10
-```
-
-Measured with `kitty` at 1280x800, release build, all four Phase 2 gates met:
-
-| | |
-|---|---|
-| Idle | one keyframe on connect, then nothing until something changes |
-| Idle with a cursor | 2.2 frames/s, 5.0 KiB/s |
-| Scrolling flat out | 39.8 frames/s, 588 KiB/s (~4.8 Mbit/s) |
-| 1080p60, synthetic | 876 kbit/s at 255 fps encode (`--example encode_probe`) |
-
-Frame rate tracks the load rather than a clock, which is the point of pacing on
-browser acks. The bandwidth is H.264 doing the job deflate could not: the same
-scrolling terminal cost ~47 Mbit/s as deflated damage rectangles.
-
-Click-to-photon is measured in the browser and shown above the surface, since
-both ends of it — the input and the frame it causes — happen there, so the page
-clock is already the shared one. Typing currently lands around **52 ms median**.
-
-### The shell
+## The shell
 
 Window chrome, stacking, the panel and the launcher are drawn by the browser in
 HTML and CSS, so they cost the compositor nothing. Dragging, raising and
-minimizing a window cost no pixels at all. Raising one sends a few bytes, and
-only because there is a single seat and the compositor has to know who is
-holding it. Maximizing and resizing are the gestures the client itself must act
-on: it is told to redraw at the new size rather than be stretched up from a
-smaller one. The corner grip sends that size once, when the drag ends — every
-configure costs the client a reallocation and the wire a keyframe, so the last
-frame is stretched for the length of the gesture and sharpens when the client
-answers.
+minimizing a window send no pixels. Raising one sends a few bytes, and only
+because there is a single seat and the compositor has to know who holds it.
 
-The chrome is the only chrome: the compositor implements `xdg-decoration` and
-answers every client `ServerSide`, so a client that would otherwise draw its own
-titlebar does not put a second one, with a second set of buttons, inside the one
-the shell drew. Clients that never ask — GTK does not implement the protocol at
-all, and its headerbar is a widget rather than a decoration — get the opposite
-treatment: the shell leaves its own titlebar off and forwards their move,
-maximize and minimize requests to the browser, so the client's own bar drives
-the same window management the shell's would have.
+Maximizing and resizing are the gestures the client itself has to act on: it is
+told to redraw at the new size rather than stretched up from a smaller one. The
+corner grip sends that size once, when the drag ends, because every configure
+costs the client a reallocation and the wire a keyframe. The last frame stays
+stretched for the length of the gesture and sharpens when the client answers.
 
-The clipboard crosses in both directions. A copy inside a client is read out of
-its selection and put on the browser's clipboard, so it pastes anywhere on the
-machine; a paste hands the browser's clipboard back, carried by the browser's own
-`paste` event — the one way a page is given the clipboard without asking for a
-permission first. Text only: an image or a file list is a copy the browser has no
-way to take.
+The shell's chrome is the only chrome. The compositor implements
+`xdg-decoration` and answers every client `ServerSide`, so nothing draws a second
+titlebar inside the first. Clients that never ask get the opposite treatment:
+GTK does not implement the protocol at all and its headerbar is a widget rather
+than a decoration, so the shell leaves its own titlebar off and forwards the
+client's move, maximize and minimize requests to the browser instead.
 
-The pointer is the client's to name: `wp_cursor_shape_manager_v1` gets a shape
-by name, and the names it uses are CSS's names, so what the client asked for
-goes straight onto the canvas — an I-beam over text, a hand over a link, nothing
-at all where a client hides it. Only over client pixels: the shell's chrome
-keeps the cursors its stylesheet gives it.
+Menus, tooltips and combobox lists are popups: surfaces the client places itself
+against the window that opened it. They stream down the same path a window does
+and the browser hangs each one off its parent, so dragging a window with a menu
+open drags the menu with it. A click outside dismisses them.
 
-Menus, tooltips and combobox lists are popups: surfaces the client places
-itself, against the window that opened it. They stream down the same path a
-window does, and the browser hangs each one off its parent, so dragging a window
-with a menu open drags the menu too. A click outside dismisses them, which is
-what a pointer grab would do in a compositor that took one.
+Workspaces are where the architecture pays off most clearly. The browser already
+holds every window, so a workspace is a filter over state it has and switching
+sends nothing at all. There are four of them in the panel, and dragging a window
+onto one sends it there. Windows on a workspace you are not looking at are
+hidden the same way minimized ones are, and like minimized ones they keep
+streaming. That is the encode cost to revisit if window counts grow.
 
-Workspaces are the clearest case of the architecture paying off: the browser
-already holds every window, so a workspace is a filter over state it has, and
-switching sends nothing at all. Four of them, in the panel; drag a window onto
-one to send it there. Windows on a workspace you are not looking at are hidden
-exactly as minimized ones are — and, like minimized ones, still streaming, which
-is the encode cost to revisit if window counts grow.
+Keys the shell keeps for itself: Alt+Tab to switch windows, Alt+1 to Alt+4 for
+workspaces, Alt+F4 or Alt+Shift+W to close. Everything else goes to the client.
+Browsers reserve Ctrl+W, Ctrl+T, F11 and friends, and the only way to get them
+back is the Keyboard Lock API, which needs fullscreen and HTTPS on Chromium.
 
-The launcher lists what it finds in `.desktop` files, with their icons. An
-application that will not start from a generic `Exec` line — anything that hands
-off to a copy already running as the same user, such as Firefox — can be given a
-different command in `~/.config/webland/launch.conf`:
+The clipboard crosses both ways. A copy inside a client is read out of its
+selection and put on the browser's clipboard, so it pastes anywhere on the
+machine. A paste hands the browser's clipboard back, carried by the browser's
+own `paste` event, which is the one way a page is given the clipboard without a
+permission prompt. Text only: an image or a file list is a copy the browser
+cannot take.
+
+The pointer is the client's to name. `wp_cursor_shape_manager_v1` gets a shape
+by name and those names are CSS's names, so what the client asked for goes
+straight onto the canvas: an I-beam over text, a hand over a link, nothing at
+all where a client hides it. That applies over client pixels only; the shell's
+chrome keeps the cursors its stylesheet gives it.
+
+A client that grabs the pointer, like a game moving a camera, gets pointer lock
+in the browser and relative motion straight through. While the lock is held the
+browser routes no events, so the shell tracks a virtual cursor and hit-tests its
+own chrome itself.
+
+## The launcher
+
+It lists what it finds in `.desktop` files, with their icons. An application
+that will not start from a generic `Exec` line, such as anything that hands off
+to a copy already running as the same user, can be given a different command in
+`~/.config/webland/launch.conf`:
 
 ```
 Firefox  = firefox --new-instance
 Chromium = chromium --user-data-dir=~/.webland/chromium
 ```
 
-The name on the left need not be the entry's whole `Name=`: any part of it will
+The name on the left need not be the entry's whole `Name=`. Any part of it will
 do, as will the `.desktop` file's own name, so `Firefox` finds the entry that
 calls itself `Firefox Web Browser`. Commands are quoted as a shell would quote
 them, so a path with a space in it goes in quotes: `--profile "~/My Profiles"`.
 
-### Reaching it from another machine
+## Reaching it from another machine
 
-The page derives its WebSocket URL from wherever it is served, so any reverse
-proxy that forwards one port will do. It must be **HTTPS**: `VideoDecoder` is a
+The page derives its socket URL from wherever it is served, so any reverse proxy
+that forwards one port will do. It has to be HTTPS: `VideoDecoder` is a
 secure-context API, and over plain `http` to anything but localhost it is
 `undefined` and every window stays black. On a tailnet:
 
 ```sh
-sudo tailscale serve --bg --https=443 http://127.0.0.1:7681
+sudo tailscale serve --bg --https=443 http://127.0.0.1:3030
 ```
 
-Linux-first and Wayland-first. Xorg is not a target, but X11 applications are:
-they run through XWayland, which the compositor starts and manages itself, and
-reach the browser as surfaces indistinguishable from Wayland ones.
+## Performance
 
+The wire cost has its own client, which connects exactly as the browser does and
+reports the rate:
+
+```sh
+cargo run --release --manifest-path backend/Cargo.toml \
+  -p webland-server --example measure -- 10
+```
+
+Measured with `kitty` at 1280x800, release build:
+
+| Scenario | Result |
+|---|---|
+| Idle | one keyframe on connect, then nothing until something changes |
+| Idle with a cursor | 2.2 frames/s, 5.0 KiB/s |
+| Scrolling flat out | 39.8 frames/s, 588 KiB/s (about 4.8 Mbit/s) |
+| 1080p60, synthetic | 876 kbit/s at 255 fps encode (`--example encode_probe`) |
+
+Frame rate tracks the load rather than a clock, which is the point of pacing on
+browser acks. The bandwidth is H.264 doing the job deflate could not: the same
+scrolling terminal cost about 47 Mbit/s as deflated damage rectangles.
+
+Click-to-photon is measured in the browser and shown above the surface, since
+the input and the frame it causes both happen there and the page clock is
+already the shared one. Typing lands around 52 ms median.
