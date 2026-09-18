@@ -1,43 +1,12 @@
-//! Browser-side compositing (first cut).
+//! Browser-side compositing.
 //!
-//! Draws `Raw` surface frames streamed from the backend onto a 2D canvas via
-//! `putImageData`. WebGPU (see [`crate::gpu`]) is the eventual target — this
-//! closes the loop visually and cheaply so the transport can be exercised end
-//! to end before the GPU pipeline exists.
+//! Draws `Raw` and `Deflate` surface frames onto a 2D canvas via `putImageData`,
+//! and blits decoded `VideoFrame`s straight from `WebCodecs`. The browser does the
+//! colour conversion in both cases.
 
 use wasm_bindgen::{Clamped, JsCast, JsValue};
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData, VideoFrame};
 use webland_protocol::{Codec, ServerMessage, SurfaceFrame, inflate};
-
-use crate::gpu::GpuRenderer;
-
-/// The active render path: WebGPU when available, else the 2D canvas.
-///
-/// `Gpu` is unreachable until [`crate::gpu`] is wired back into the scene; see
-/// the note there.
-#[allow(dead_code)]
-pub enum Renderer {
-    Gpu(Box<GpuRenderer>),
-    Canvas(SurfaceRenderer),
-}
-
-impl Renderer {
-    /// Apply a server message to whichever renderer is active.
-    pub fn handle(&mut self, message: ServerMessage) {
-        match self {
-            Renderer::Gpu(renderer) => renderer.handle(message),
-            Renderer::Canvas(renderer) => renderer.handle(message),
-        }
-    }
-
-    /// Draw a frame that came back from the video decoder.
-    pub fn draw_video_frame(&mut self, frame: &VideoFrame) {
-        match self {
-            Renderer::Gpu(renderer) => renderer.draw_video_frame(frame),
-            Renderer::Canvas(renderer) => renderer.draw_video_frame(frame),
-        }
-    }
-}
 
 /// Renders one surface's frames into a canvas.
 #[derive(Debug)]
@@ -83,6 +52,8 @@ impl SurfaceRenderer {
             | ServerMessage::SurfaceTitle { .. }
             | ServerMessage::SurfaceRequest { .. }
             | ServerMessage::Cursor { .. }
+            | ServerMessage::Clipboard { .. }
+            | ServerMessage::PointerConstraint { .. }
             | ServerMessage::Applications(_) => {}
         }
     }
@@ -109,7 +80,15 @@ impl SurfaceRenderer {
         if region.width == 0 || region.height == 0 {
             return;
         }
-        let expected = (region.width as usize) * (region.height as usize) * 4;
+        // Checked, because `usize` is 32 bits on wasm32: a damage rectangle big
+        // enough to overflow the product would wrap to a small `expected` and
+        // quietly pass the length test below.
+        let Some(expected) = (region.width as usize)
+            .checked_mul(region.height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+        else {
+            return;
+        };
         if rgba.len() < expected {
             return;
         }

@@ -36,10 +36,37 @@ body {
 .window {
   position: absolute;
   border-radius: 0.5rem;
-  overflow: hidden;
   background: #16161c;
   box-shadow: 0 0.75rem 2rem rgb(0 0 0 / 55%);
   border: 1px solid #2a2a33;
+  transition: border-color 0.15s, box-shadow 0.15s, opacity 0.15s;
+}
+
+.window.active {
+  border-color: #3b82f6;
+  box-shadow: 0 0.75rem 2.5rem rgb(0 0 0 / 70%), 0 0 0 1px rgba(59, 130, 246, 0.45), 0 0 16px rgba(59, 130, 246, 0.2);
+}
+
+.window.active > .titlebar {
+  background: #232838;
+}
+
+.window.active > .titlebar > .title {
+  color: #f0f0f5;
+  font-weight: 600;
+}
+
+.window:not(.active) {
+  opacity: 0.94;
+  border-color: #24242c;
+}
+
+.window:not(.active) > .titlebar {
+  background: #191920;
+}
+
+.window:not(.active) > .titlebar > .title {
+  color: #82828e;
 }
 
 .titlebar {
@@ -52,6 +79,8 @@ body {
   /* The bar is the drag handle, so never let a drag select its text. */
   user-select: none;
   cursor: grab;
+  border-top-left-radius: calc(0.5rem - 1px);
+  border-top-right-radius: calc(0.5rem - 1px);
 }
 
 .titlebar:active {
@@ -67,7 +96,24 @@ body {
   color: #c8c8d0;
 }
 
+.lock-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.72rem;
+  font-weight: 500;
+  padding: 2px 6px;
+  background: rgba(70, 140, 240, 0.18);
+  color: #70b0ff;
+  border-radius: 4px;
+  border: 1px solid rgba(112, 176, 255, 0.25);
+  cursor: default;
+  user-select: none;
+}
+
 .titlebar button {
+  position: relative;
+  z-index: 12;
   border: 0;
   border-radius: 0.25rem;
   width: 22px;
@@ -96,6 +142,8 @@ body {
 .surface {
   position: relative;
   overflow: hidden;
+  border-bottom-left-radius: calc(0.5rem - 1px);
+  border-bottom-right-radius: calc(0.5rem - 1px);
 }
 
 .window canvas {
@@ -107,22 +155,81 @@ body {
      until the client answers the configure at the new size. */
 }
 
-/* The resize grip: a corner of the window, not a widget in it. Above the canvas
-   so the surface underneath never swallows the gesture. */
-.grip {
+/* Resize handles around the window edges and corners. Invisible to the eye,
+   revealed only by the cursor when the pointer nears an edge. */
+.resize-handle {
   position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 16px;
-  height: 16px;
-  cursor: nwse-resize;
-  /* Two hairlines, the conventional corner hatching. */
-  background: repeating-linear-gradient(
-    -45deg,
-    transparent 0 3px,
-    #4a4a58 3px 4px
-  );
+  user-select: none;
   touch-action: none;
+  z-index: 20;
+}
+
+.resize-top {
+  top: -6px;
+  left: 12px;
+  right: 12px;
+  height: 14px;
+  cursor: ns-resize;
+}
+
+.resize-bottom {
+  bottom: -6px;
+  left: 12px;
+  right: 12px;
+  height: 14px;
+  cursor: ns-resize;
+}
+
+.resize-left {
+  left: -6px;
+  top: 12px;
+  bottom: 12px;
+  width: 14px;
+  cursor: ew-resize;
+}
+
+.resize-right {
+  right: -6px;
+  top: 12px;
+  bottom: 12px;
+  width: 14px;
+  cursor: ew-resize;
+}
+
+.resize-top-left {
+  top: -8px;
+  left: -8px;
+  width: 22px;
+  height: 22px;
+  cursor: nwse-resize;
+  z-index: 25;
+}
+
+.resize-top-right {
+  top: -8px;
+  right: -8px;
+  width: 22px;
+  height: 22px;
+  cursor: nesw-resize;
+  z-index: 25;
+}
+
+.resize-bottom-left {
+  bottom: -8px;
+  left: -8px;
+  width: 22px;
+  height: 22px;
+  cursor: nesw-resize;
+  z-index: 25;
+}
+
+.resize-bottom-right {
+  bottom: -8px;
+  right: -8px;
+  width: 22px;
+  height: 22px;
+  cursor: nwse-resize;
+  z-index: 25;
 }
 
 #webland-panel {
@@ -279,6 +386,25 @@ body {
   color: #e6e6ea;
 }
 
+#webland-panel .task.active {
+  background: #222b3d;
+  border-color: #3b82f6;
+  color: #ffffff;
+  box-shadow: 0 0 8px rgba(59, 130, 246, 0.3);
+  position: relative;
+}
+
+#webland-panel .task.active::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 4px;
+  right: 4px;
+  height: 2px;
+  background: #3b82f6;
+  border-radius: 1px;
+}
+
 #webland-panel .clock {
   color: #9a9aa6;
   font: 500 0.8rem/1 system-ui, sans-serif;
@@ -310,8 +436,38 @@ body {
 /* A window whose client draws its own titlebar: ours would sit directly above
    the client's, two bars and two sets of buttons for one window. The bar stays
    in the DOM and simply goes away — the shell still owns the frame, the resize
-   grip and the stacking. */
+   handles and the stacking. */
 .window.bare > .titlebar {
+  display: none;
+}
+
+.window.bare > .surface {
+  border-radius: calc(0.5rem - 1px);
+}
+
+/* Maximized windows fill their area flush: no rounded corners or borders,
+   and no resize handles. */
+.window.maximized {
+  border-radius: 0;
+  border: none;
+}
+
+.window.maximized > .titlebar,
+.window.maximized > .surface,
+.window.maximized.bare > .surface {
+  border-radius: 0;
+}
+
+.window.maximized > .resize-handle {
+  display: none;
+}
+
+/* Snapped windows disable resize handles. */
+.window.snapped {
+  border-radius: 0.35rem;
+}
+
+.window.snapped > .resize-handle {
   display: none;
 }
 
@@ -325,6 +481,482 @@ body {
 }
 
 .window.popup > .titlebar,
-.window.popup > .grip {
+.window.popup > .resize-handle {
   display: none;
 }
+
+.panel-controls {
+  display: flex;
+  gap: 0.375rem;
+  align-items: center;
+}
+
+.panel-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.3rem 0.6rem;
+  border: 1px solid #2f2f3a;
+  border-radius: 0.375rem;
+  background: #1c1c24;
+  color: #c8c8d0;
+  font: 500 0.78rem/1 system-ui, sans-serif;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.panel-btn:hover {
+  border-color: #454556;
+  background: #262631;
+  color: #fff;
+}
+
+.panel-btn.active {
+  background: #253347;
+  border-color: #4a75a0;
+  color: #8cc0ff;
+}
+
+.capture-banner {
+  position: fixed;
+  top: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2147483646;
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0.45rem 0.9rem 0.45rem 1.1rem;
+  border-radius: 9999px;
+  background: rgba(18, 18, 24, 0.88);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 0.5rem 2rem rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  color: #e6e6ea;
+  font: 500 0.82rem/1.2 system-ui, sans-serif;
+  pointer-events: auto;
+  user-select: none;
+  animation: capture-banner-fade-in 0.2s ease-out;
+}
+
+@keyframes capture-banner-fade-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -10px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+.capture-text {
+  font-weight: 500;
+  color: #e2e8f0;
+  letter-spacing: 0.01em;
+}
+
+.capture-release-btn {
+  padding: 0.25rem 0.7rem;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.08);
+  color: #f1f5f9;
+  font: 500 0.75rem/1 system-ui, sans-serif;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.capture-release-btn:hover {
+  background: rgba(255, 255, 255, 0.18);
+  border-color: rgba(255, 255, 255, 0.3);
+  color: #fff;
+}
+
+/* When pointer lock is active, completely hide the OS host cursor across the entire page */
+body.pointer-locked,
+body.pointer-locked * {
+  cursor: none !important;
+}
+
+.virtual-cursor {
+  position: fixed;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  z-index: 2147483647;
+  width: 24px;
+  height: 24px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%231f232d'/%3E%3Cstop offset='100%25' stop-color='%230d0f14'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M1 1 L1 17.5 L5.5 13.5 L9 21.5 L12 20.2 L8.6 12.5 L15 12.5 Z' fill='url(%23g)' stroke='%23ffffff' stroke-width='1.5' stroke-linejoin='round' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-size: 24px 24px;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.45)) drop-shadow(0 1px 2px rgba(0, 0, 0, 0.35));
+  will-change: transform;
+}
+
+.virtual-cursor.ns-resize {
+  margin-left: -12px;
+  margin-top: -12px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M12 2 L7 7 L10 7 L10 17 L7 17 L12 22 L17 17 L14 17 L14 7 L17 7 Z' fill='%231f232d' stroke='%23ffffff' stroke-width='1.5' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+.virtual-cursor.ew-resize {
+  margin-left: -12px;
+  margin-top: -12px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M2 12 L7 7 L7 10 L17 10 L17 7 L22 12 L17 17 L17 14 L7 14 L7 17 Z' fill='%231f232d' stroke='%23ffffff' stroke-width='1.5' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+.virtual-cursor.nwse-resize {
+  margin-left: -12px;
+  margin-top: -12px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M4 4 L10 4 L7.8 6.2 L17.8 16.2 L20 14 L20 20 L14 20 L16.2 17.8 L6.2 7.8 L4 10 Z' fill='%231f232d' stroke='%23ffffff' stroke-width='1.5' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+.virtual-cursor.nesw-resize {
+  margin-left: -12px;
+  margin-top: -12px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M20 4 L14 4 L16.2 6.2 L6.2 16.2 L4 14 L4 20 L10 20 L7.8 17.8 L17.8 7.8 L20 10 Z' fill='%231f232d' stroke='%23ffffff' stroke-width='1.5' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+.virtual-cursor.pointer {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M9 2 L9 13 L6.5 11 L4.5 13 L8.5 17 L13 21.5 L19 21.5 L20 14 L17 10 L13 10 L13 4 C13 2.9 12.1 2 11 2 C9.9 2 9 2.9 9 2 Z' fill='%231f232d' stroke='%23ffffff' stroke-width='1.5' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+.virtual-cursor.grab {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M7 11 L7 5 C7 4 8 3 9 3 C10 3 11 4 11 5 L11 10 L11 4 C11 3 12 2 13 2 C14 2 15 3 15 4 L15 10 L15 5 C15 4 16 3 17 3 C18 3 19 4 19 5 L19 13 C19 18 15 22 10 22 C6 22 4 19 4 16 L4 12 C4 11 5 10 6 10 C7 10 7 11 7 11 Z' fill='%231f232d' stroke='%23ffffff' stroke-width='1.5' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+.virtual-cursor.grabbing {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M6 13 L6 10 C6 9 7 8 8 8 C9 8 10 9 10 10 L10 9 C10 8 11 7 12 7 C13 7 14 8 14 9 L14 8 C14 7 15 6 16 6 C17 6 18 7 18 8 L18 14 C18 18 15 21 11 21 C7 21 5 18 5 15 Z' fill='%231f232d' stroke='%23ffffff' stroke-width='1.5' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+.virtual-cursor.text {
+  margin-left: -12px;
+  margin-top: -12px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M8 4 L16 4 M12 4 L12 20 M8 20 L16 20' stroke='%23ffffff' stroke-width='2.5' stroke-linecap='round'/%3E%3Cpath d='M8 4 L16 4 M12 4 L12 20 M8 20 L16 20' stroke='%231f232d' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+
+/* Aero Snap ghost preview overlay */
+.snap-preview {
+  position: fixed;
+  pointer-events: none;
+  z-index: 2147482000;
+  border: 2px solid #3b82f6;
+  background: rgba(59, 130, 246, 0.15);
+  box-shadow: 0 0 24px rgba(59, 130, 246, 0.3);
+  backdrop-filter: blur(4px);
+  border-radius: 0.5rem;
+  transition: all 0.12s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.snap-preview.maximize {
+  top: 6px;
+  left: 6px;
+  right: 6px;
+  bottom: 46px;
+}
+
+.snap-preview.left {
+  top: 6px;
+  left: 6px;
+  width: calc(50vw - 9px);
+  bottom: 46px;
+}
+
+.snap-preview.right {
+  top: 6px;
+  right: 6px;
+  width: calc(50vw - 9px);
+  bottom: 46px;
+}
+
+/* Titlebar context menu */
+.menu-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2147483640;
+  background: transparent;
+}
+
+.titlebar-menu {
+  position: fixed;
+  z-index: 2147483641;
+  min-width: 160px;
+  background: #1c1c24;
+  border: 1px solid #2f2f3d;
+  border-radius: 0.5rem;
+  box-shadow: 0 0.75rem 2.5rem rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  padding: 0.35rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  user-select: none;
+  animation: context-menu-fade 0.1s ease-out;
+}
+
+@keyframes context-menu-fade {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.titlebar-menu button {
+  background: transparent;
+  border: none;
+  border-radius: 0.3rem;
+  color: #d0d0d8;
+  font: 500 0.8rem/1.2 system-ui, sans-serif;
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  transition: background 0.1s, color 0.1s;
+}
+
+.titlebar-menu button:hover {
+  background: #2a2a38;
+  color: #fff;
+}
+
+.titlebar-menu button.menu-danger:hover {
+  background: #a03040;
+  color: #fff;
+}
+
+.titlebar-menu .menu-separator {
+  height: 1px;
+  background: #2a2a35;
+  margin: 0.25rem 0.2rem;
+}
+
+.titlebar-menu .menu-section-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: #707080;
+  padding: 0.25rem 0.6rem 0.1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.titlebar-menu .menu-workspace-row {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.1rem 0.4rem 0.25rem;
+}
+
+.titlebar-menu .menu-ws-btn {
+  flex: 1;
+  justify-content: center;
+  text-align: center;
+  padding: 0.3rem 0;
+  border: 1px solid #2f2f3d;
+  background: #22222d;
+  font-weight: 600;
+}
+
+.titlebar-menu .menu-ws-btn:hover {
+  border-color: #3b82f6;
+  background: #2b354d;
+  color: #fff;
+}
+
+.titlebar-menu .menu-ws-btn.active {
+  background: #3b82f6;
+  border-color: #3b82f6;
+  color: #fff;
+}
+
+/* Alt+Tab Switcher HUD */
+.alt-tab-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483645;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(8px);
+  animation: alt-tab-fade-in 0.1s ease-out;
+}
+
+@keyframes alt-tab-fade-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.alt-tab-container {
+  display: flex;
+  gap: 0.75rem;
+  padding: 1rem 1.25rem;
+  max-width: 80vw;
+  overflow-x: auto;
+  background: rgba(22, 22, 30, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 0.75rem;
+  box-shadow: 0 1.5rem 3.5rem rgba(0, 0, 0, 0.75), 0 0 20px rgba(0, 0, 0, 0.5);
+}
+
+.alt-tab-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  width: 100px;
+  height: 90px;
+  padding: 0.5rem;
+  border-radius: 0.5rem;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  color: #c0c0cc;
+  cursor: pointer;
+  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+  user-select: none;
+}
+
+.alt-tab-item:hover {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.15);
+  color: #fff;
+}
+
+.alt-tab-item.selected {
+  background: #25334d;
+  border-color: #3b82f6;
+  color: #fff;
+  box-shadow: 0 0 15px rgba(59, 130, 246, 0.4), inset 0 0 10px rgba(59, 130, 246, 0.2);
+  transform: translateY(-2px);
+}
+
+.alt-tab-icon {
+  font-size: 1.75rem;
+  line-height: 1;
+}
+
+.alt-tab-title {
+  font: 500 0.75rem/1.2 system-ui, sans-serif;
+  max-width: 88px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+}
+
+/* Toast Notifications */
+.toast-container {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  z-index: 2147483646;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  min-width: 220px;
+  max-width: 320px;
+  padding: 0.6rem 0.85rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border-radius: 0.5rem;
+  background: rgba(24, 24, 32, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 0.75rem 2rem rgba(0, 0, 0, 0.6), 0 0 10px rgba(59, 130, 246, 0.2);
+  backdrop-filter: blur(8px);
+  color: #e6e6ea;
+  user-select: none;
+  animation: toast-slide-in 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes toast-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.toast-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.toast-title {
+  font: 600 0.82rem/1.2 system-ui, sans-serif;
+  color: #fff;
+}
+
+.toast-message {
+  font: 400 0.75rem/1.2 system-ui, sans-serif;
+  color: #9a9aa8;
+}
+
+.toast-close {
+  background: transparent;
+  border: none;
+  color: #888898;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0.2rem;
+  border-radius: 0.25rem;
+}
+
+.toast-close:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+/* Launcher Backdrop & Navigation */
+.launcher-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2147482998;
+  background: transparent;
+}
+
+#webland-panel .app.selected {
+  background: #283044;
+  color: #fff;
+}
+
+#webland-panel .no-results {
+  padding: 1rem 0.75rem;
+  text-align: center;
+  color: #707080;
+  font: 400 0.82rem/1 system-ui, sans-serif;
+}
+
+#webland-panel .launch.active {
+  background: #33334a;
+  border-color: #4d4d6b;
+  color: #fff;
+}
+

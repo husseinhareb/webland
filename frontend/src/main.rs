@@ -7,7 +7,6 @@
 mod compositor;
 mod decode;
 mod desktop;
-mod gpu;
 mod input;
 mod latency;
 mod protocol;
