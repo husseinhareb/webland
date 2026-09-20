@@ -61,6 +61,8 @@ pub struct Scene {
     pub captured: RwSignal<bool>,
     /// Whether the browser is currently in fullscreen mode.
     pub fullscreen: RwSignal<bool>,
+    /// The desktop background this browser was given, as a data URL.
+    pub wallpaper: RwSignal<Option<String>>,
     /// The virtual cursor position on screen (when captured and not hidden).
     pub virtual_cursor: RwSignal<Option<(f64, f64)>>,
     /// The currently active / focused window ID.
@@ -131,6 +133,7 @@ impl Scene {
             dragging: RwSignal::new(None),
             captured: RwSignal::new(false),
             fullscreen: RwSignal::new(false),
+            wallpaper: RwSignal::new(None),
             virtual_cursor: RwSignal::new(None),
             focused: RwSignal::new(None),
             snap_preview: RwSignal::new(None),
@@ -161,6 +164,13 @@ impl Scene {
                 self.windows.update(|ws| {
                     if let Some(window) = ws.iter_mut().find(|w| w.id == id.0) {
                         window.title = title;
+                    }
+                });
+            }
+            ServerMessage::SurfaceAppId { id, app_id } => {
+                self.windows.update(|ws| {
+                    if let Some(window) = ws.iter_mut().find(|w| w.id == id.0) {
+                        window.app_id = Some(app_id);
                     }
                 });
             }
@@ -387,6 +397,7 @@ impl Scene {
                 image: (width, height),
                 content: created.content,
                 title: String::from("…"),
+                app_id: None,
                 x: remembered.map_or(40 + offset, |placement| placement.x),
                 y: remembered.map_or(40 + offset, |placement| placement.y),
                 z: 0,

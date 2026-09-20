@@ -50,6 +50,7 @@ impl SurfaceRenderer {
             // The scene owns surface lifetime and chrome; a renderer only draws.
             ServerMessage::SurfaceDestroyed { .. }
             | ServerMessage::SurfaceTitle { .. }
+            | ServerMessage::SurfaceAppId { .. }
             | ServerMessage::SurfaceRequest { .. }
             | ServerMessage::Cursor { .. }
             | ServerMessage::Clipboard { .. }

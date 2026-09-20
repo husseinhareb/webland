@@ -368,6 +368,9 @@ body {
 }
 
 #webland-panel .task {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
   max-width: 14rem;
   overflow: hidden;
   white-space: nowrap;
@@ -379,6 +382,21 @@ body {
   color: #c8c8d0;
   font: 500 0.8rem/1 system-ui, sans-serif;
   cursor: pointer;
+}
+
+#webland-panel .task-icon {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  flex: none;
+}
+
+/* The title gives way before the icon does: at eight windows the strip is all
+   the panel has room for, and a picture survives being narrow. */
+#webland-panel .task-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 #webland-panel .task:hover {
@@ -516,6 +534,80 @@ body {
   background: #253347;
   border-color: #4a75a0;
   color: #8cc0ff;
+}
+
+/* The overflow tray: the chevron, and the popover it opens above the panel. */
+.panel-controls {
+  position: relative;
+}
+
+.stats {
+  color: #6f6f80;
+  font: 500 0.72rem/1 ui-monospace, "SFMono-Regular", Menlo, monospace;
+  /* Monospace and fixed-width so a changing number does not shuffle the bar. */
+  min-width: 11rem;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.tray-toggle {
+  /* A chevron, not a word: it is the one control in the bar that is only ever
+     a door to the others. */
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 0.3rem 0.5rem;
+}
+
+.tray {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 0.5rem);
+  display: none;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 11rem;
+  padding: 0.375rem;
+  border: 1px solid #2f2f3a;
+  border-radius: 0.5rem;
+  background: #16161d;
+  box-shadow: 0 0.75rem 1.5rem rgba(0, 0, 0, 0.45);
+}
+
+.tray.open {
+  display: flex;
+}
+
+.tray-item {
+  padding: 0.4rem 0.6rem;
+  border: 1px solid transparent;
+  border-radius: 0.375rem;
+  background: transparent;
+  color: #c8c8d0;
+  font: 500 0.78rem/1 system-ui, sans-serif;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tray-item:hover {
+  background: #23232d;
+  color: #fff;
+}
+
+.wallpaper-file {
+  display: none;
+}
+
+.tray-item.active {
+  background: #253347;
+  border-color: #4a75a0;
+  color: #8cc0ff;
+}
+
+/* Catches the click that closes the tray, and nothing else: it sits under the
+   popover but over every window. */
+.tray-backdrop {
+  position: fixed;
+  inset: 0;
 }
 
 .capture-banner {

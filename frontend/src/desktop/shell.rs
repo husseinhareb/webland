@@ -16,7 +16,7 @@ use super::chrome::{AltTabModal, ToastContainer};
 use super::connect::connect;
 use super::panel::Panel;
 use super::window::Window;
-use super::{capture, drag};
+use super::{capture, drag, wallpaper};
 
 /// How much of the desktop a newly opened window takes up.
 const WINDOW_FRACTION: f64 = 0.62;
@@ -73,6 +73,11 @@ pub fn Desktop() -> impl IntoView {
     let scene = StoredValue::new_local(scene);
     let transport = StoredValue::new_local(transport);
 
+    // Whatever this browser last chose, back on the desktop before the first
+    // window arrives.
+    scene.with_value(|scene| scene.wallpaper.set(wallpaper::load()));
+    let wallpaper = scene.with_value(|scene| scene.wallpaper);
+
     let captured = scene.with_value(|scene| scene.captured);
     let virtual_cursor = scene.with_value(|scene| scene.virtual_cursor);
     let cursor_icon = scene.with_value(|scene| scene.cursor_icon);
@@ -110,6 +115,7 @@ pub fn Desktop() -> impl IntoView {
 
     view! {
         <main node_ref=desktop_ref id="webland-desktop"
+              style=move || wallpaper::style(wallpaper.get().as_ref())
               on:pointermove=move |event: PointerEvent| drag.moved(&event)
               on:pointerup=move |_| drag.dropped()
               on:pointercancel=move |_| drag.dropped()>

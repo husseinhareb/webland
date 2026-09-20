@@ -1,5 +1,6 @@
 //! The panel: one button per open window on this workspace, the launcher, the
-//! workspace switcher, the capture and fullscreen toggles, and a clock.
+//! workspace switcher, an overflow tray holding the session's own toggles, and
+//! a clock.
 //!
 //! With windows stacked on top of each other a buried one is unreachable, so the
 //! task buttons are what make more than two of them usable at all. Raising from
@@ -15,9 +16,10 @@ use wasm_bindgen::closure::Closure;
 use crate::protocol::WebSocketTransport;
 use crate::scene::Scene;
 
-use super::capture;
 use super::launcher::Launcher;
+use super::stats::Stats;
 use super::tasks::Tasks;
+use super::tray::Tray;
 
 /// How many workspaces there are. Fixed at the usual four: a count nobody
 /// changes is not a setting, and empty ones cost nothing.
@@ -29,9 +31,7 @@ pub fn Panel(
     transport: StoredValue<Option<Rc<WebSocketTransport>>, LocalStorage>,
 ) -> impl IntoView {
     let current = scene.with_value(|scene| scene.workspace);
-    let captured = scene.with_value(|scene| scene.captured);
-    let fullscreen = scene.with_value(|scene| scene.fullscreen);
-    let open = RwSignal::new(false);
+    let open = scene.with_value(|scene| scene.launcher_open);
     let clock = RwSignal::new(now());
     // A minute is the resolution shown, so that is the resolution ticked.
     {
@@ -46,6 +46,7 @@ pub fn Panel(
     }
 
     let switch_workspace = move |n: u32| {
+        open.set(false);
         current.set(n);
         scene.with_value(|s| s.show_toast(format!("Workspace {}", n + 1), None));
     };
@@ -60,7 +61,13 @@ pub fn Panel(
             <button
                 class="launch"
                 class:active=move || open.get()
-                on:pointerdown=move |_| open.update(|open| *open = !*open)
+                on:pointerdown=move |e: web_sys::PointerEvent| {
+                    e.prevent_default();
+                    open.update(|open| *open = !*open);
+                }
+                on:mousedown=move |e: web_sys::MouseEvent| {
+                    e.prevent_default();
+                }
             >
                 "Apps"
             </button>
@@ -79,24 +86,8 @@ pub fn Panel(
                 </For>
             </div>
             <Tasks scene=scene transport=transport />
-            <div class="panel-controls">
-                <button
-                    class="panel-btn"
-                    class:active=move || captured.get()
-                    on:pointerdown=move |_| capture::toggle(scene)
-                    title="Lock cursor inside desktop (ESC to release)"
-                >
-                    {move || if captured.get() { "Cursor Locked" } else { "Cursor Lock" }}
-                </button>
-                <button
-                    class="panel-btn"
-                    class:active=move || fullscreen.get()
-                    on:pointerdown=move |_| capture::toggle_fullscreen(scene)
-                    title="Toggle Fullscreen"
-                >
-                    {move || if fullscreen.get() { "🗗 Windowed" } else { "⛶ Fullscreen" }}
-                </button>
-            </div>
+            <Stats transport=transport />
+            <Tray scene=scene />
             <span class="clock">{move || clock.get()}</span>
         </footer>
     }

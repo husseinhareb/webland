@@ -7,6 +7,9 @@
 //! Frames are opaque bytes here; WebTransport would be a second type with the
 //! same four methods, and nothing below assumes a socket beyond that.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use web_sys::{BinaryType, MessageEvent, WebSocket};
@@ -15,6 +18,26 @@ use web_sys::{BinaryType, MessageEvent, WebSocket};
 #[derive(Debug)]
 pub struct WebSocketTransport {
     socket: WebSocket,
+    /// Bytes this socket has carried, each way, since it opened. Counted here
+    /// because this is the one place every frame passes through, and shown in
+    /// the panel: on a link that is not loopback, the bandwidth a desktop costs
+    /// is the thing worth watching.
+    traffic: Rc<Traffic>,
+}
+
+/// Bytes sent and received on one socket.
+#[derive(Debug, Default)]
+pub struct Traffic {
+    sent: Cell<u64>,
+    received: Cell<u64>,
+}
+
+impl Traffic {
+    /// Totals since the socket opened: `(received, sent)`.
+    #[must_use]
+    pub fn totals(&self) -> (u64, u64) {
+        (self.received.get(), self.sent.get())
+    }
 }
 
 impl WebSocketTransport {
@@ -26,20 +49,37 @@ impl WebSocketTransport {
     pub fn connect(url: &str) -> Result<Self, wasm_bindgen::JsValue> {
         let socket = WebSocket::new(url)?;
         socket.set_binary_type(BinaryType::Arraybuffer);
-        Ok(Self { socket })
+        Ok(Self {
+            socket,
+            traffic: Rc::new(Traffic::default()),
+        })
+    }
+
+    /// What this socket has carried, for whoever wants to display it.
+    #[must_use]
+    pub fn traffic(&self) -> Rc<Traffic> {
+        self.traffic.clone()
     }
 
     /// Put a frame on the wire.
     pub fn send(&self, frame: &[u8]) {
+        self.traffic
+            .sent
+            .set(self.traffic.sent.get() + frame.len() as u64);
         // A dropped frame surfaces later as a closed socket; nothing to do here.
         let _ = self.socket.send_with_u8_array(frame);
     }
 
     /// Run `handler` for every frame that arrives.
     pub fn on_message(&self, handler: Box<dyn Fn(Vec<u8>)>) {
+        let traffic = self.traffic.clone();
         let closure = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
             if let Ok(buffer) = event.data().dyn_into::<js_sys::ArrayBuffer>() {
-                handler(js_sys::Uint8Array::new(buffer.as_ref()).to_vec());
+                let frame = js_sys::Uint8Array::new(buffer.as_ref()).to_vec();
+                traffic
+                    .received
+                    .set(traffic.received.get() + frame.len() as u64);
+                handler(frame);
             }
         });
         self.socket

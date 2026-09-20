@@ -37,6 +37,10 @@ pub struct WindowState {
     /// client's own margin, which is black once encoded and so is clipped away.
     pub content: Rect,
     pub title: String,
+    /// What the client calls itself — `firefox`, `org.gnome.Nautilus` — which
+    /// is how the panel finds the application's icon. `None` until the client
+    /// says, and for a client that never does.
+    pub app_id: Option<String>,
     pub x: i32,
     pub y: i32,
     pub z: i32,

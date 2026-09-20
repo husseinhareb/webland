@@ -1125,6 +1125,24 @@ struct Planes {
 ///
 /// An X client sets `WM_NAME` on its X window rather than through `xdg_shell`,
 /// so the two have to be asked separately for the same answer.
+/// Which application a surface belongs to.
+///
+/// `app_id` for a Wayland client and `WM_CLASS` for an X11 one: both are meant
+/// to name the `.desktop` file the window came from, which is what lets the
+/// panel find its icon.
+fn surface_app_id(state: &Webland, surface: &WlSurface) -> Option<String> {
+    if let Some(window) = state.x11_for(surface) {
+        let class = window.class();
+        return (!class.is_empty()).then_some(class);
+    }
+    smithay::wayland::compositor::with_states(surface, |states| {
+        states
+            .data_map
+            .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+            .and_then(|data| data.lock().ok()?.app_id.clone())
+    })
+}
+
 fn surface_title(state: &Webland, surface: &WlSurface) -> Option<String> {
     if let Some(window) = state.x11_for(surface) {
         let title = window.title();
@@ -1765,6 +1783,8 @@ struct Tracked {
     clock: FrameClock,
     /// The title the browser has been told, so an unchanged one costs nothing.
     title: Option<String>,
+    /// The application id the browser has been told, likewise.
+    app_id: Option<String>,
     /// Where a popup was last said to hang. A menu the client repositions keeps
     /// its size, so a size change alone would not notice one moving.
     anchor: Option<Anchor>,
@@ -1839,6 +1859,7 @@ fn stream_dirty(
                 encoder: None,
                 clock: FrameClock::new(),
                 title: None,
+                app_id: None,
                 anchor: None,
                 locked: false,
             }
@@ -1948,6 +1969,17 @@ fn stream_dirty(
         // nothing, whatever the last one was told.
         if announced {
             tracked.title = None;
+            tracked.app_id = None;
+        }
+        let app_id = surface_app_id(state, surface);
+        if app_id.is_some() && tracked.app_id != app_id {
+            tracked.app_id.clone_from(&app_id);
+            if let Some(app_id) = app_id {
+                emit(ServerMessage::SurfaceAppId {
+                    id: tracked.id,
+                    app_id,
+                });
+            }
         }
         let title = surface_title(state, surface);
         if title.is_some() && tracked.title != title {

@@ -66,6 +66,7 @@ impl Applications {
             names.push(Application {
                 id,
                 name,
+                app_id: stem.clone(),
                 icon: icon.as_deref().and_then(icon_data_url),
             });
             commands.insert(id, argv(&exec, &home));

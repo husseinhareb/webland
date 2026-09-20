@@ -15,7 +15,7 @@
 //! child.
 //!
 //! `DISPLAY` gets the same treatment for the same reason. Inheriting the host's
-//! meant that with no XWayland running, an X client started here connected to
+//! meant that with no `XWayland` running, an X client started here connected to
 //! the host's X server and its window was never seen again.
 //!
 //! What this cannot fix is an application that keeps its state in a directory
@@ -32,7 +32,7 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 pub struct Env {
     /// Our Wayland socket.
     display: OsString,
-    /// Our X display number, when XWayland is running.
+    /// Our X display number, when `XWayland` is running.
     xdisplay: Option<u32>,
     /// Our own session bus, when one could be started.
     bus: Option<Bus>,
@@ -57,11 +57,12 @@ impl Env {
     #[must_use]
     pub fn new(display: &OsStr, xdisplay: Option<u32>) -> Self {
         let bus = Bus::start();
-        match &bus {
-            Some(bus) => tracing::info!(address = %bus.address, "session bus"),
-            None => tracing::warn!(
+        if let Some(bus) = &bus {
+            tracing::info!(address = %bus.address, "session bus");
+        } else {
+            tracing::warn!(
                 "no session bus of our own: single-instance applications may open on the host desktop"
-            ),
+            );
         }
         Self {
             display: display.to_os_string(),
@@ -77,7 +78,7 @@ impl Env {
         command.env("WAYLAND_DISPLAY", &self.display);
         // Toolkits pick their backend from this, and inherit `x11` verbatim when
         // webland itself was started from an X session — which sends everything
-        // the long way round through XWayland.
+        // the long way round through `XWayland`.
         command.env("XDG_SESSION_TYPE", "wayland");
         match self.xdisplay {
             Some(number) => command.env("DISPLAY", format!(":{number}")),
@@ -152,7 +153,7 @@ mod tests {
 
     /// Without a bus of our own, the host's must be taken away rather than
     /// left in place — inheriting it is the bug this module exists for. The
-    /// same goes for `DISPLAY` with no XWayland running.
+    /// same goes for `DISPLAY` with no `XWayland` running.
     #[test]
     fn nothing_of_the_host_session_is_inherited() {
         let env = Env {
@@ -169,7 +170,7 @@ mod tests {
         )));
     }
 
-    /// With XWayland up, X clients get our display number and nothing else.
+    /// With `XWayland` up, X clients get our display number and nothing else.
     #[test]
     fn xwayland_display_is_ours() {
         let env = Env {

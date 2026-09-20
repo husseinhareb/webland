@@ -85,6 +85,11 @@ pub enum Codec {
 pub struct Application {
     pub id: u32,
     pub name: String,
+    /// The `.desktop` file's basename — `firefox`, `org.gnome.Nautilus` — which
+    /// is also what a Wayland client reports as its `app_id`. It is the only
+    /// thing the two sides have in common, and so the only way the panel can
+    /// put an application's icon on its window's task button.
+    pub app_id: String,
     /// The application's icon as a `data:` URL, when one was found — the
     /// launcher is a list a person reads, and it reads faster with pictures.
     pub icon: Option<String>,
@@ -216,6 +221,15 @@ pub enum ServerMessage {
     SurfaceTitle {
         id: SurfaceId,
         title: String,
+    },
+    /// Which application the surface belongs to, as the client names itself.
+    ///
+    /// Its own message for the same reason as the title: a client may set it
+    /// after mapping, and an X11 client's class arrives whenever its window
+    /// manager gets round to reading it.
+    SurfaceAppId {
+        id: SurfaceId,
+        app_id: String,
     },
     /// The surface's client asked the shell to move, maximize or minimize it.
     ///

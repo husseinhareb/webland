@@ -37,7 +37,7 @@ version = "0.3"
 # Widened as the frontend reaches for WebCodecs.
 features = [
     "Window", "Document", "Element", "EventTarget", "Location", "DomRect", "CssStyleDeclaration", "Storage",
-    "WebSocket", "BinaryType", "MessageEvent", "Event",
+    "WebSocket", "BinaryType", "MessageEvent", "Event", "FileReader", "File", "FileList", "Blob",
     "HtmlCanvasElement", "CanvasRenderingContext2d", "ImageData", "HtmlInputElement",
     "PointerEvent", "PointerEventInit", "MouseEvent", "MouseEventInit", "KeyboardEvent",
     "HtmlElement",

@@ -71,19 +71,53 @@ pub fn Tasks(
                         .filter(|w| w.parent.is_none() && w.workspace == current.get())
                         .collect::<Vec<_>>()
                 }
-                key=|window| (window.id, window.title.clone())
+                key=|window| (window.id, window.title.clone(), window.app_id.clone())
                 let:window
             >
                 <button
                     class="task"
                     class:active=move || scene.with_value(|s| s.focused.get() == Some(window.id))
                     on:pointerdown=move |_| click(window.id)
+                    title=window.title.clone()
                 >
-                    {window.title.clone()}
+                    {icon(scene, window.app_id.clone())}
+                    <span class="task-title">{window.title.clone()}</span>
                 </button>
             </For>
         </div>
     }
+}
+
+/// The application icon for a window, if its client named an application the
+/// launcher also knows about.
+///
+/// The match is on the `.desktop` file's basename, which is what `app_id` is
+/// supposed to be — and often is not exactly: a client may report `Navigator`
+/// or trail a `.desktop`, so the comparison is case-insensitive and settles for
+/// one name ending in the other rather than demanding they be equal.
+fn icon(scene: StoredValue<Scene, LocalStorage>, app_id: Option<String>) -> impl IntoView {
+    let applications = scene.with_value(|scene| scene.applications);
+    move || {
+        let app_id = app_id.as_ref()?.to_lowercase();
+        let icon = applications.with(|apps| {
+            apps.iter()
+                .find(|app| matches(&app.app_id.to_lowercase(), &app_id))
+                .and_then(|app| app.icon.clone())
+        })?;
+        Some(view! { <img class="task-icon" src=icon alt="" /> })
+    }
+}
+
+/// Whether a client's `app_id` names the same application as a `.desktop`
+/// file's basename.
+fn matches(stem: &str, app_id: &str) -> bool {
+    let app_id = app_id.strip_suffix(".desktop").unwrap_or(app_id);
+    if stem == app_id || stem.rsplit('.').next() == app_id.rsplit('.').next() {
+        return true;
+    }
+    // A suffix match is how `org.gnome.Nautilus` finds `nautilus`, but on two
+    // or three letters it is not a match, it is a coincidence.
+    stem.len().min(app_id.len()) >= 4 && (stem.ends_with(app_id) || app_id.ends_with(stem))
 }
 
 /// The topmost window on `workspace` other than `skip`, if there is one.

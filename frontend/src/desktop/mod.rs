@@ -17,9 +17,12 @@ mod menu;
 mod panel;
 mod resize;
 mod shell;
+mod stats;
 mod style;
 mod tasks;
 mod titlebar;
+mod tray;
+mod wallpaper;
 mod window;
 
 pub use shell::Desktop;
