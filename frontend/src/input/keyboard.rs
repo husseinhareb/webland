@@ -45,6 +45,7 @@ extern "C" {
 pub fn install(scene: &Scene, transport: &Rc<WebSocketTransport>, latency: &Rc<Latency>) {
     let pending_paste: Rc<RefCell<Option<PendingPaste>>> = Rc::new(RefCell::new(None));
     wire_paste(transport.clone(), pending_paste.clone());
+    clipboard::sync_on_focus(transport.clone());
 
     // Keyboard, on the window so keys are captured without focusing the canvas.
     if let Some(window) = web_sys::window() {

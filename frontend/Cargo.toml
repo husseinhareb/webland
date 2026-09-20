@@ -44,6 +44,7 @@ features = [
     "Navigator", "Clipboard", "ClipboardEvent", "DataTransfer",
     "Performance",
     "VideoDecoder", "VideoDecoderConfig", "VideoDecoderInit", "VideoFrame", "DomRectReadOnly", "CodecState",
+    "MediaSource", "SourceBuffer", "SourceBufferList", "HtmlAudioElement", "HtmlMediaElement", "TimeRanges", "Url",
     "EncodedVideoChunk", "EncodedVideoChunkInit", "EncodedVideoChunkType",
     "console",
 ]

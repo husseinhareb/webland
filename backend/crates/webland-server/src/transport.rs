@@ -18,6 +18,8 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use webland_protocol::{ClientMessage, ServerMessage, decode, encode};
 
+use crate::audio;
+
 // Frames are not paced here. They are paced at the source, by the compositor's
 // per-surface `FrameClock`: it withholds `wl_surface.frame` callbacks until the
 // browser acks, so a throttled client never draws and no frame is produced.
@@ -79,6 +81,13 @@ impl Connection {
     /// Queue a message for the browser. Returns `false` if the connection is gone.
     pub fn send(&self, message: ServerMessage) -> bool {
         self.outgoing.send(message).is_ok()
+    }
+
+    /// A handle for pushing messages from somewhere other than the frame loop —
+    /// the audio capture, which produces on its own thread and at its own pace.
+    #[must_use]
+    pub fn sender(&self) -> mpsc::UnboundedSender<ServerMessage> {
+        self.outgoing.clone()
     }
 
     /// Await the next input from the browser, or `None` once it disconnects.
@@ -202,6 +211,10 @@ pub fn spawn_server(
                                 return;
                             }
                         };
+                        // This browser's own audio stream, for as long as it
+                        // is connected: the capture stops when `_audio` drops
+                        // at the end of this task.
+                        let _audio = audio::capture(connection.sender());
                         // Subscribed once there is somewhere to put the frames:
                         // a subscription nobody reads from fills up and reports
                         // a lag that costs everyone a keyframe.

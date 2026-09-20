@@ -206,6 +206,9 @@ impl Scene {
                     doc.exit_pointer_lock();
                 }
             }
+            // Played by the page, handled before this (see `desktop::connect`):
+            // no window owns it and nothing about it is drawn.
+            ServerMessage::Audio { .. } => {}
             ServerMessage::SurfaceDestroyed { id } => {
                 self.views.borrow_mut().remove(&id.0);
                 self.windows.update(|ws| ws.retain(|w| w.id != id.0));

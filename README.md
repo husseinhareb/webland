@@ -20,8 +20,12 @@ by the browser, and a shell with window chrome, a panel, a launcher, four
 workspaces, Alt+Tab, edge snapping and a shared clipboard. X11 applications work
 through XWayland, which the compositor starts and manages itself.
 
-Not there yet: application notifications, a system tray, audio, a settings UI,
-and authentication. The protocol has no auth at all, so bind it to localhost and put
+Applications play into a null sink of the session's own, which is streamed to
+the browser as Opus — the sound follows the desktop to whatever machine is
+watching it, and the host's own speakers stay the host's.
+
+Not there yet: application notifications, a system tray, a settings UI, and
+authentication. The protocol has no auth at all, so bind it to localhost and put
 a proxy in front if you want it elsewhere. [docs/roadmap.md](docs/roadmap.md)
 has the order of work, [docs/architecture.md](docs/architecture.md) the shape of
 the code.

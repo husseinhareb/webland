@@ -51,6 +51,7 @@ impl SurfaceRenderer {
             ServerMessage::SurfaceDestroyed { .. }
             | ServerMessage::SurfaceTitle { .. }
             | ServerMessage::SurfaceAppId { .. }
+            | ServerMessage::Audio { .. }
             | ServerMessage::SurfaceRequest { .. }
             | ServerMessage::Cursor { .. }
             | ServerMessage::Clipboard { .. }

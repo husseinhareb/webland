@@ -1,6 +1,15 @@
 //! Clipboard, both directions. The browser hands over a paste without a
 //! permission prompt as long as it comes from its own `paste` event, which is
 //! why the paste chord's key event is deferred until the text has been sent.
+//!
+//! That event is not always enough. It only fires where the browser thinks
+//! something can be pasted *into*, so copying in an application outside the
+//! browser and pressing the chord over a client's surface could reach the
+//! compositor with nothing attached — the copy simply did not cross. So the
+//! clipboard is also read whenever the page regains focus, which is exactly
+//! when the user has come back from copying something somewhere else. That read
+//! needs permission, asked for once by the browser; without it the `paste`
+//! event remains the path and nothing is worse than before.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -92,6 +101,45 @@ pub fn wire_paste(transport: Rc<WebSocketTransport>, pending: Rc<RefCell<Option<
         },
     );
     let _ = window.add_event_listener_with_callback("paste", listener.as_ref().unchecked_ref());
+    listener.forget();
+}
+
+/// Send the browser's clipboard whenever the page is returned to.
+///
+/// The last text sent is remembered, so coming back to a tab a dozen times does
+/// not send the same paragraph a dozen times — and so the text this browser was
+/// *given* by a client is not immediately handed back to the compositor as if
+/// the user had copied it outside.
+pub fn sync_on_focus(transport: Rc<WebSocketTransport>) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let last: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    let listener = Closure::<dyn FnMut()>::new(move || {
+        let transport = transport.clone();
+        let last = last.clone();
+        let Some(clipboard) = web_sys::window().map(|window| window.navigator().clipboard()) else {
+            return;
+        };
+        wasm_bindgen_futures::spawn_local(async move {
+            // Denied permission, an empty clipboard, or an image: all of them
+            // land here, and all of them mean there is nothing to send.
+            let Ok(text) = wasm_bindgen_futures::JsFuture::from(clipboard.read_text()).await else {
+                return;
+            };
+            let Some(text) = text.as_string() else {
+                return;
+            };
+            if text.is_empty() || *last.borrow() == text {
+                return;
+            }
+            last.replace(text.clone());
+            if let Ok(bytes) = encode(&ClientMessage::Clipboard { text }) {
+                transport.send(&bytes);
+            }
+        });
+    });
+    let _ = window.add_event_listener_with_callback("focus", listener.as_ref().unchecked_ref());
     listener.forget();
 }
 

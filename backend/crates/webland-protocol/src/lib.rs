@@ -241,6 +241,16 @@ pub enum ServerMessage {
         id: SurfaceId,
         request: WindowRequest,
     },
+    /// A piece of the session's audio, as a WebM/Opus byte stream.
+    ///
+    /// Opaque and ordered: the browser appends these to a media source in the
+    /// order they arrive and nothing here looks inside them. The first chunk a
+    /// connection receives is the stream's header, so the capture is started
+    /// per browser rather than shared — a browser that joined halfway through
+    /// somebody else's stream would have nothing to initialise a decoder with.
+    Audio {
+        payload: Vec<u8>,
+    },
     /// A client put this text on the clipboard; the browser should too, so a
     /// copy inside webland can be pasted anywhere on the machine.
     Clipboard {

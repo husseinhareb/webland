@@ -138,11 +138,23 @@ pub fn connect(
         });
     }
 
+    // Built once, whatever the browser allows: a player that cannot play is
+    // `None` and the desktop is simply silent.
+    let player = crate::audio::Player::new();
+
     let ack = transport.clone();
     transport.on_message(Box::new(move |bytes| {
         let Ok(message) = decode::<ServerMessage>(&bytes) else {
             return;
         };
+        // Audio belongs to the page, not to the scene: no window owns it and
+        // nothing about it is drawn.
+        if let ServerMessage::Audio { payload } = message {
+            if let Some(player) = player.as_ref() {
+                player.push(payload);
+            }
+            return;
+        }
         if let ServerMessage::SurfaceCreated(ref created) = message
             && created.parent.is_none()
             && let Ok(frame) = encode(&ClientMessage::Focus { id: created.id })

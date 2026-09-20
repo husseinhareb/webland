@@ -27,6 +27,14 @@ use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader};
 use std::process::{Child, ChildStdout, Command, Stdio};
 
+/// The null sink every application Webland starts plays into.
+///
+/// Its own sink, not the machine's: the sound belongs to the session, and the
+/// session is being watched in a browser that may be on another machine
+/// entirely. The server captures this sink's monitor and streams it; the host's
+/// own speakers keep playing the host's own audio and nothing else.
+pub const AUDIO_SINK: &str = "webland";
+
 /// What every child of the compositor is told about the session it joins.
 #[derive(Debug)]
 pub struct Env {
@@ -80,6 +88,9 @@ impl Env {
         // webland itself was started from an X session — which sends everything
         // the long way round through `XWayland`.
         command.env("XDG_SESSION_TYPE", "wayland");
+        // Into the session's own sink, which is what gets its audio to the
+        // browser instead of to the speakers of whatever machine this is.
+        command.env("PULSE_SINK", AUDIO_SINK);
         match self.xdisplay {
             Some(number) => command.env("DISPLAY", format!(":{number}")),
             None => command.env_remove("DISPLAY"),

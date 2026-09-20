@@ -5,6 +5,7 @@
 //! back. Set `WEBLAND_WS=127.0.0.1:PORT` to bring it up; `WEBLAND_HEADLESS`
 //! drops the local window so the browser is the only display.
 
+mod audio;
 mod transport;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -28,6 +29,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         (None, None)
     };
+
+    // The session's own audio sink, created before the compositor starts so
+    // that everything it launches finds it. Held to the end of `main`: dropping
+    // it takes the sink away again.
+    let _sink = audio::Sink::create();
 
     // Headless makes the browser the only display; winit keeps a local window
     // (a visual ground-truth for debugging). Default to winit unless asked.

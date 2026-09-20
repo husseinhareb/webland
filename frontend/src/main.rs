@@ -4,6 +4,7 @@
 //! that `webland-protocol` is shared verbatim with the backend and the wire
 //! format cannot drift between the two sides.
 
+mod audio;
 mod compositor;
 mod decode;
 mod desktop;
