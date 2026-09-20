@@ -59,8 +59,32 @@ impl SurfaceRenderer {
     }
 
     /// Blit a decoded video frame. The browser does the colour conversion.
+    ///
+    /// Clipped to the frame's visible rectangle and no further than the canvas:
+    /// an encoder rounds a surface up to whole macroblocks, and the padding it
+    /// adds is undefined pixels — green, in practice, since empty NV12 decodes
+    /// that way. The stream's crop is supposed to hide it and usually does, so
+    /// this is the belt to that braces: nothing outside the surface's own box
+    /// can reach the canvas whatever the decoder hands over.
     pub fn draw_video_frame(&self, frame: &VideoFrame) {
-        let _ = self.ctx.draw_image_with_video_frame(frame, 0.0, 0.0);
+        let (canvas_w, canvas_h) = (self.canvas.width(), self.canvas.height());
+        let visible = frame.visible_rect();
+        let width = visible
+            .as_ref()
+            .map_or(f64::from(canvas_w), web_sys::DomRectReadOnly::width)
+            .min(f64::from(canvas_w));
+        let height = visible
+            .as_ref()
+            .map_or(f64::from(canvas_h), web_sys::DomRectReadOnly::height)
+            .min(f64::from(canvas_h));
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+        let _ = self
+            .ctx
+            .draw_image_with_video_frame_and_sw_and_sh_and_dx_and_dy_and_dw_and_dh(
+                frame, 0.0, 0.0, width, height, 0.0, 0.0, width, height,
+            );
     }
 
     fn draw(&self, frame: &SurfaceFrame) {

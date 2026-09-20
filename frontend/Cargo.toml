@@ -43,7 +43,7 @@ features = [
     "HtmlElement",
     "Navigator", "Clipboard", "ClipboardEvent", "DataTransfer",
     "Performance",
-    "VideoDecoder", "VideoDecoderConfig", "VideoDecoderInit", "VideoFrame",
+    "VideoDecoder", "VideoDecoderConfig", "VideoDecoderInit", "VideoFrame", "DomRectReadOnly", "CodecState",
     "EncodedVideoChunk", "EncodedVideoChunkInit", "EncodedVideoChunkType",
     "console",
 ]

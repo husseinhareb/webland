@@ -55,14 +55,12 @@ impl ClientDrag {
         let Some(id) = dragging.get_untracked() else {
             return;
         };
+        let pointer = (event.client_x(), event.client_y());
         let (x, y) = if captured.get_untracked() {
-            virtual_cursor
-                .get_untracked()
-                .unwrap_or((event.client_x(), event.client_y()))
+            virtual_cursor.get_untracked().unwrap_or(pointer)
         } else {
-            (event.client_x(), event.client_y())
+            pointer
         };
-        let (x, y) = (f64::from(x), f64::from(y));
         self.last.with_value(|last| last.set(Some((x, y))));
         let Some(transport) = self.transport.get_value() else {
             return;

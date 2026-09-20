@@ -129,6 +129,15 @@ pub fn connect(
         });
     }
 
+    {
+        let asking = transport.clone();
+        scene.on_keyframe_wanted(move || {
+            if let Ok(frame) = encode(&ClientMessage::RequestKeyframe) {
+                asking.send(&frame);
+            }
+        });
+    }
+
     let ack = transport.clone();
     transport.on_message(Box::new(move |bytes| {
         let Ok(message) = decode::<ServerMessage>(&bytes) else {

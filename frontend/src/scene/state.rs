@@ -88,6 +88,10 @@ pub struct Scene {
     /// compositor, so it must fire on presentation and not on arrival: see
     /// [`Scene::paint`].
     pub(super) acks: Rc<RefCell<Option<Ack>>>,
+    /// Asks the compositor for a keyframe. A decoder that has just been rebuilt
+    /// has no reference frame, and every delta until the next keyframe is so
+    /// much black.
+    pub(super) keyframes: Rc<RefCell<Option<Box<dyn Fn()>>>>,
     pub(super) latency: Rc<Latency>,
     pub(super) top: Rc<Cell<i32>>,
     pub(super) opened: Rc<Cell<i32>>,
@@ -117,6 +121,7 @@ impl Scene {
             views: Rc::new(RefCell::new(HashMap::new())),
             pending: Rc::new(RefCell::new(HashMap::new())),
             acks: Rc::new(RefCell::new(None)),
+            keyframes: Rc::new(RefCell::new(None)),
             latency,
             top: Rc::new(Cell::new(1)),
             opened: Rc::new(Cell::new(0)),
@@ -202,6 +207,11 @@ impl Scene {
         }
     }
 
+    /// Be told when a surface can make no use of anything but a keyframe.
+    pub fn on_keyframe_wanted(&self, request: impl Fn() + 'static) {
+        *self.keyframes.borrow_mut() = Some(Box::new(request));
+    }
+
     /// Be told when a frame has been presented, so it can be acked.
     ///
     /// The second argument is whether the surface is on screen: a hidden window
@@ -219,14 +229,21 @@ impl Scene {
             // ack comes from the decoder's own callback — except when the chunk
             // was never queued, which produces no callback and would leave the
             // surface waiting forever.
-            let queued = view.decoder.as_ref().is_some_and(|decoder| {
-                // The canvas bitmap, not the window state: the bitmap is by
-                // definition what the client last rendered at, while the state's
-                // size is the box on screen — which a resize grip drags ahead of
-                // the client for the length of the gesture.
-                decoder.decode(&frame.payload, view.canvas.width(), view.canvas.height())
-            });
+            let queued = view
+                .decoder
+                .as_ref()
+                .is_some_and(|decoder| decoder.decode(&frame.payload));
             if !queued {
+                // A decoder with no configuration drops everything until a
+                // keyframe, and the compositor sends one only when asked.
+                if view
+                    .decoder
+                    .as_ref()
+                    .is_some_and(Decoder::take_keyframe_request)
+                    && let Some(request) = self.keyframes.borrow().as_ref()
+                {
+                    request();
+                }
                 self.presented(id);
             }
         } else {
