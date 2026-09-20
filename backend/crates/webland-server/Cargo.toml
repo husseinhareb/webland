@@ -8,6 +8,12 @@ publish.workspace = true
 
 [dependencies]
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "signal", "sync"] }
+# The system tray is a freedesktop StatusNotifier host on the session bus we
+# start ourselves, and `png` is how an item's own pixmap becomes something a
+# browser can draw.
+zbus = { version = "4", features = ["tokio"] }
+png = "0.17"
+
 tokio-tungstenite = "0.24"
 futures-util = { version = "0.3.34", default-features = false, features = ["sink"] }
 tracing = "0.1.44"

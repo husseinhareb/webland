@@ -19,6 +19,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use webland_protocol::{ClientMessage, ServerMessage, decode, encode};
 
 use crate::audio;
+use crate::tray::Tray;
 
 // Frames are not paced here. They are paced at the source, by the compositor's
 // per-surface `FrameClock`: it withholds `wl_surface.frame` callbacks until the
@@ -156,6 +157,108 @@ async fn upgrade(
     })
 }
 
+/// Serve one browser until it goes away.
+///
+/// Everything a connection owns lives for exactly as long as this call: its
+/// audio capture, its subscription to the frame stream, and the tray snapshot
+/// it is sent on arrival.
+async fn serve(
+    stream: tokio::net::TcpStream,
+    peer: SocketAddr,
+    sink: FrameSink,
+    client_tx: mpsc::UnboundedSender<ClientMessage>,
+    tray: Option<std::sync::Arc<Tray>>,
+) {
+    let mut connection = match upgrade(stream, peer).await {
+        Ok(connection) => connection,
+        Err(err) => {
+            tracing::warn!(%err, %peer, "websocket handshake failed");
+            return;
+        }
+    };
+    // This browser's own audio stream, for as long as it
+    // is connected: the capture stops when `_audio` drops
+    // at the end of this task.
+    let _audio = audio::capture(connection.sender());
+    // Whatever is in the tray already: a browser that
+    // connects after the applications did would otherwise
+    // see an empty one until something changed.
+    if let Some(tray) = tray.clone() {
+        let to_browser = connection.sender();
+        tokio::spawn(async move {
+            let items = tray.snapshot().await;
+            if !items.is_empty() {
+                let _ = to_browser.send(ServerMessage::Tray { items });
+            }
+        });
+    }
+    // Subscribed once there is somewhere to put the frames:
+    // a subscription nobody reads from fills up and reports
+    // a lag that costs everyone a keyframe.
+    let mut frames = sink.subscribe();
+    loop {
+        tokio::select! {
+            incoming = connection.recv() => match incoming {
+                // The ack both releases a withheld frame
+                // here and credits the compositor's frame
+                // clock.
+                Some(ClientMessage::FramePresented { id }) => {
+                    let _ = client_tx.send(ClientMessage::FramePresented { id });
+                }
+                // The tray is the server's own business:
+                // these never reach the compositor.
+                Some(ClientMessage::TrayActivate { id, secondary }) => {
+                    if let Some(tray) = tray.clone() {
+                        tokio::spawn(async move {
+                            tray.activate(&id, secondary).await;
+                        });
+                    }
+                }
+                Some(ClientMessage::TrayMenuOpen { id }) => {
+                    if let Some(tray) = tray.clone() {
+                        let to_browser = connection.sender();
+                        tokio::spawn(async move {
+                            let items = tray.menu(&id).await;
+                            let _ = to_browser
+                                .send(ServerMessage::TrayMenu { id, items });
+                        });
+                    }
+                }
+                Some(ClientMessage::TrayMenuClick { id, item }) => {
+                    if let Some(tray) = tray.clone() {
+                        tokio::spawn(async move {
+                            tray.click(&id, item).await;
+                        });
+                    }
+                }
+                Some(message) => {
+                    let _ = client_tx.send(message);
+                }
+                None => break,
+            },
+            frame = frames.recv() => match frame {
+                Ok(message) => {
+                    if !connection.send(message) {
+                        break;
+                    }
+                }
+                // The broadcast queue overflowed and frames
+                // were lost. The decoder is now applying
+                // deltas against a reference it never
+                // received, so ask for a keyframe rather
+                // than let it render nonsense until the
+                // next one happens along.
+                Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                    tracing::warn!(dropped, "browser fell behind; resyncing");
+                    let _ = client_tx.send(ClientMessage::RequestKeyframe);
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+        }
+    }
+    tracing::info!(%peer, "browser disconnected");
+}
+
 /// Run a WebSocket server on a background thread.
 ///
 /// Each connected browser receives every frame the compositor pushes into
@@ -182,6 +285,11 @@ pub fn spawn_server(
             };
 
             runtime.block_on(async move {
+                // The tray is the session's, not a browser's: it is watched for
+                // as long as the server runs, and every connected browser is
+                // told the same list.
+                let tray = Tray::start(sink.clone()).await;
+
                 let listener = match bind(addr).await {
                     Ok(listener) => listener,
                     Err(err) => {
@@ -203,58 +311,8 @@ pub fn spawn_server(
                     // browser is accepted while this one is still upgrading.
                     let sink = sink.clone();
                     let client_tx = client.clone();
-                    tokio::spawn(async move {
-                        let mut connection = match upgrade(stream, peer).await {
-                            Ok(connection) => connection,
-                            Err(err) => {
-                                tracing::warn!(%err, %peer, "websocket handshake failed");
-                                return;
-                            }
-                        };
-                        // This browser's own audio stream, for as long as it
-                        // is connected: the capture stops when `_audio` drops
-                        // at the end of this task.
-                        let _audio = audio::capture(connection.sender());
-                        // Subscribed once there is somewhere to put the frames:
-                        // a subscription nobody reads from fills up and reports
-                        // a lag that costs everyone a keyframe.
-                        let mut frames = sink.subscribe();
-                        loop {
-                            tokio::select! {
-                                incoming = connection.recv() => match incoming {
-                                    // The ack both releases a withheld frame
-                                    // here and credits the compositor's frame
-                                    // clock.
-                                    Some(ClientMessage::FramePresented { id }) => {
-                                        let _ = client_tx.send(ClientMessage::FramePresented { id });
-                                    }
-                                    Some(message) => {
-                                        let _ = client_tx.send(message);
-                                    }
-                                    None => break,
-                                },
-                                frame = frames.recv() => match frame {
-                                    Ok(message) => {
-                                        if !connection.send(message) {
-                                            break;
-                                        }
-                                    }
-                                    // The broadcast queue overflowed and frames
-                                    // were lost. The decoder is now applying
-                                    // deltas against a reference it never
-                                    // received, so ask for a keyframe rather
-                                    // than let it render nonsense until the
-                                    // next one happens along.
-                                    Err(broadcast::error::RecvError::Lagged(dropped)) => {
-                                        tracing::warn!(dropped, "browser fell behind; resyncing");
-                                        let _ = client_tx.send(ClientMessage::RequestKeyframe);
-                                    }
-                                    Err(broadcast::error::RecvError::Closed) => break,
-                                },
-                            }
-                        }
-                        tracing::info!(%peer, "browser disconnected");
-                    });
+                    let tray = tray.clone();
+                    tokio::spawn(serve(stream, peer, sink, client_tx, tray));
                 }
             });
         });

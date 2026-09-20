@@ -17,9 +17,10 @@ use crate::protocol::WebSocketTransport;
 use crate::scene::Scene;
 
 use super::launcher::Launcher;
+use super::overflow::Overflow;
 use super::stats::Stats;
+use super::systray::SystemTray;
 use super::tasks::Tasks;
-use super::tray::Tray;
 
 /// How many workspaces there are. Fixed at the usual four: a count nobody
 /// changes is not a setting, and empty ones cost nothing.
@@ -86,8 +87,9 @@ pub fn Panel(
                 </For>
             </div>
             <Tasks scene=scene transport=transport />
+            <SystemTray scene=scene transport=transport />
             <Stats transport=transport />
-            <Tray scene=scene />
+            <Overflow scene=scene />
             <span class="clock">{move || clock.get()}</span>
         </footer>
     }

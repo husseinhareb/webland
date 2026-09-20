@@ -95,6 +95,39 @@ pub struct Application {
     pub icon: Option<String>,
 }
 
+/// One icon in the system tray, as its application describes itself.
+///
+/// The `id` is the item's address on the session bus and the handle for
+/// everything the browser can do with it. It is opaque on this side of the
+/// wire: the browser sends it back, it never parses it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrayItem {
+    pub id: String,
+    /// What the item calls itself, for a tooltip. Often empty.
+    pub title: String,
+    /// The icon as a `data:` URL — the item's own pixmap re-encoded, or the
+    /// file its icon name resolved to in the icon theme.
+    pub icon: Option<String>,
+}
+
+/// One row of a tray item's menu.
+///
+/// Flattened from `com.canonical.dbusmenu`, which is a tree of properties the
+/// browser has no business knowing about. What survives is what a menu is: a
+/// label, whether it can be clicked, whether it is ticked, and its children.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrayMenuItem {
+    /// The dbusmenu id, sent back to say which row was clicked.
+    pub id: i32,
+    pub label: String,
+    pub enabled: bool,
+    /// `Some` for a checkbox or radio row, and then whether it is ticked.
+    pub checked: Option<bool>,
+    /// A rule rather than a row: no label, nothing to click.
+    pub separator: bool,
+    pub children: Vec<TrayMenuItem>,
+}
+
 /// Where a popup hangs: which surface it belongs to, and where on it.
 ///
 /// A menu is not a window. It has no chrome, no place in the panel and no
@@ -241,6 +274,22 @@ pub enum ServerMessage {
         id: SurfaceId,
         request: WindowRequest,
     },
+    /// The system tray's contents, whenever they change.
+    ///
+    /// Whole list rather than a delta: a tray holds a handful of icons, and a
+    /// browser that just connected needs the whole thing anyway.
+    Tray {
+        items: Vec<TrayItem>,
+    },
+    /// The menu of one tray item, in answer to [`ClientMessage::TrayMenuOpen`].
+    ///
+    /// Fetched when it is asked for, never cached: a tray menu says what an
+    /// application is doing right now — connected networks, playing or paused —
+    /// and a stale one is worse than a slow one.
+    TrayMenu {
+        id: String,
+        items: Vec<TrayMenuItem>,
+    },
     /// A piece of the session's audio, as a WebM/Opus byte stream.
     ///
     /// Opaque and ordered: the browser appends these to a media source in the
@@ -311,6 +360,16 @@ pub enum ClientMessage {
     Clipboard { text: String },
     /// Start the application with this id, as the launcher does.
     Launch { id: u32 },
+    /// Click a tray icon: the item's own action, or its alternate one.
+    ///
+    /// What the action does is entirely the application's business — most
+    /// present a window, some toggle something, some only have a menu and do
+    /// nothing at all here.
+    TrayActivate { id: String, secondary: bool },
+    /// Ask for a tray item's menu, answered by [`ServerMessage::TrayMenu`].
+    TrayMenuOpen { id: String },
+    /// Pick a row of the menu last opened for this item.
+    TrayMenuClick { id: String, item: i32 },
     /// Ask the surface's client to close, as a window button does.
     ///
     /// A request, not an order: the client may put up a save dialog, or ignore

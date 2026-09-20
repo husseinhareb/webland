@@ -52,6 +52,8 @@ impl SurfaceRenderer {
             | ServerMessage::SurfaceTitle { .. }
             | ServerMessage::SurfaceAppId { .. }
             | ServerMessage::Audio { .. }
+            | ServerMessage::Tray { .. }
+            | ServerMessage::TrayMenu { .. }
             | ServerMessage::SurfaceRequest { .. }
             | ServerMessage::Cursor { .. }
             | ServerMessage::Clipboard { .. }

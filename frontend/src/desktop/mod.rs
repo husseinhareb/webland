@@ -14,14 +14,15 @@ mod connect;
 mod drag;
 mod launcher;
 mod menu;
+mod overflow;
 mod panel;
 mod resize;
 mod shell;
 mod stats;
 mod style;
+mod systray;
 mod tasks;
 mod titlebar;
-mod tray;
 mod wallpaper;
 mod window;
 

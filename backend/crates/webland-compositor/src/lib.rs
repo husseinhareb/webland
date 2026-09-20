@@ -1603,6 +1603,11 @@ fn drain_client(
             ClientMessage::Launch { id } => launching.push(id),
             ClientMessage::SetMaximized { id, size } => maximizing.push((id, size)),
             ClientMessage::SetSize { id, size } => sizing.push((id, size)),
+            // The tray lives on the session bus and is the server's business;
+            // these are answered before they ever reach the compositor.
+            ClientMessage::TrayActivate { .. }
+            | ClientMessage::TrayMenuOpen { .. }
+            | ClientMessage::TrayMenuClick { .. } => {}
         }
     }
     if focus_changed {

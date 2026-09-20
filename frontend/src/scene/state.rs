@@ -9,7 +9,8 @@ use leptos::prelude::*;
 use web_sys::HtmlCanvasElement;
 use webland_core::SurfaceId;
 use webland_protocol::{
-    Application, Codec, ServerMessage, SurfaceCreated, SurfaceFrame, WindowRequest,
+    Application, Codec, ServerMessage, SurfaceCreated, SurfaceFrame, TrayItem, TrayMenuItem,
+    WindowRequest,
 };
 
 use crate::compositor::SurfaceRenderer;
@@ -44,6 +45,11 @@ pub struct Scene {
     pub windows: RwSignal<Vec<WindowState>>,
     /// What the launcher may start, as the compositor reported it.
     pub applications: RwSignal<Vec<Application>>,
+    /// The system tray's icons, as their applications publish them.
+    pub tray: RwSignal<Vec<TrayItem>>,
+    /// The tray menu on screen: which item it belongs to, and its rows. Asked
+    /// for when the user opens it, so it says what the application is doing now.
+    pub tray_menu: RwSignal<Option<(String, Vec<TrayMenuItem>)>>,
     /// The workspace on screen. Windows on any other one are hidden.
     pub workspace: RwSignal<u32>,
     /// The pointer's look over a client's surface, as a CSS cursor keyword —
@@ -127,6 +133,8 @@ impl Scene {
         Self {
             windows: RwSignal::new(Vec::new()),
             applications: RwSignal::new(Vec::new()),
+            tray: RwSignal::new(Vec::new()),
+            tray_menu: RwSignal::new(None),
             workspace: RwSignal::new(0),
             cursor: RwSignal::new(String::from("default")),
             requests: RwSignal::new(None),
@@ -160,6 +168,17 @@ impl Scene {
         match message {
             ServerMessage::SurfaceCreated(created) => self.opened(created),
             ServerMessage::Applications(applications) => self.applications.set(applications),
+            ServerMessage::Tray { items } => {
+                // A menu whose item has gone would hang there with nothing to
+                // send its clicks to.
+                if let Some((id, _)) = self.tray_menu.get_untracked()
+                    && !items.iter().any(|item| item.id == id)
+                {
+                    self.tray_menu.set(None);
+                }
+                self.tray.set(items);
+            }
+            ServerMessage::TrayMenu { id, items } => self.tray_menu.set(Some((id, items))),
             ServerMessage::SurfaceTitle { id, title } => {
                 self.windows.update(|ws| {
                     if let Some(window) = ws.iter_mut().find(|w| w.id == id.0) {

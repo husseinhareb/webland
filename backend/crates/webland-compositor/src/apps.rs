@@ -345,7 +345,8 @@ fn icon_path(name: &str) -> Option<PathBuf> {
 ///
 /// Inlined rather than fetched: the compositor speaks one WebSocket and serves
 /// no HTTP, and the whole listing is one message sent once.
-fn icon_data_url(name: &str) -> Option<String> {
+#[must_use]
+pub fn icon_data_url(name: &str) -> Option<String> {
     let path = icon_path(name)?;
     let bytes = std::fs::read(&path).ok()?;
     // The listing goes over the wire in a single message, so one oversized icon
@@ -367,7 +368,8 @@ fn icon_data_url(name: &str) -> Option<String> {
 }
 
 /// Standard base64, which is all the `data:` URL above needs.
-fn base64(bytes: &[u8]) -> String {
+#[must_use]
+pub fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {

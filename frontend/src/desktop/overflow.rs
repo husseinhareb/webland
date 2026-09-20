@@ -1,4 +1,4 @@
-//! The panel's overflow tray: the chevron at the end of the bar, and the
+//! The panel's overflow menu: the chevron at the end of the bar, and the
 //! session's own controls behind it.
 //!
 //! These are the settings that belong to the browser showing the desktop rather
@@ -14,36 +14,36 @@ use crate::scene::Scene;
 use super::{capture, wallpaper};
 
 #[component]
-pub fn Tray(scene: StoredValue<Scene, LocalStorage>) -> impl IntoView {
+pub fn Overflow(scene: StoredValue<Scene, LocalStorage>) -> impl IntoView {
     let captured = scene.with_value(|scene| scene.captured);
     let fullscreen = scene.with_value(|scene| scene.fullscreen);
-    let tray_open = RwSignal::new(false);
+    let open = RwSignal::new(false);
     let wallpaper_ref: NodeRef<Input> = NodeRef::new();
 
     view! {
         <div class="panel-controls">
             {move || {
-                tray_open.get().then(|| {
+                open.get().then(|| {
                     view! {
-                        <div class="tray-backdrop"
-                             on:pointerdown=move |_| tray_open.set(false) />
+                        <div class="overflow-backdrop"
+                             on:pointerdown=move |_| open.set(false) />
                     }
                 })
             }}
             <button
-                class="panel-btn tray-toggle"
-                class:active=move || tray_open.get()
-                on:pointerdown=move |_| tray_open.update(|tray| *tray = !*tray)
+                class="panel-btn overflow-toggle"
+                class:active=move || open.get()
+                on:pointerdown=move |_| open.update(|open| *open = !*open)
                 title="Session controls"
             >
                 "⌃"
             </button>
-            <div class="tray" class:open=move || tray_open.get()>
+            <div class="overflow" class:open=move || open.get()>
                 <button
-                    class="tray-item"
+                    class="overflow-item"
                     class:active=move || captured.get()
                     on:pointerdown=move |_| {
-                        tray_open.set(false);
+                        open.set(false);
                         capture::toggle(scene);
                     }
                     title="Lock cursor inside desktop (ESC to release)"
@@ -51,10 +51,10 @@ pub fn Tray(scene: StoredValue<Scene, LocalStorage>) -> impl IntoView {
                     {move || if captured.get() { "Cursor Locked" } else { "Cursor Lock" }}
                 </button>
                 <button
-                    class="tray-item"
+                    class="overflow-item"
                     class:active=move || fullscreen.get()
                     on:pointerdown=move |_| {
-                        tray_open.set(false);
+                        open.set(false);
                         capture::toggle_fullscreen(scene);
                     }
                     title="Toggle Fullscreen"
@@ -69,14 +69,14 @@ pub fn Tray(scene: StoredValue<Scene, LocalStorage>) -> impl IntoView {
                     type="file"
                     accept="image/*"
                     on:change=move |_| {
-                        tray_open.set(false);
+                        open.set(false);
                         if let Some(input) = wallpaper_ref.get() {
                             wallpaper::chosen(&input, scene);
                         }
                     }
                 />
                 <button
-                    class="tray-item"
+                    class="overflow-item"
                     on:pointerdown=move |_| {
                         if let Some(input) = wallpaper_ref.get() {
                             input.click();
@@ -90,9 +90,9 @@ pub fn Tray(scene: StoredValue<Scene, LocalStorage>) -> impl IntoView {
                     scene.with_value(|s| s.wallpaper.get()).is_some().then(|| {
                         view! {
                             <button
-                                class="tray-item"
+                                class="overflow-item"
                                 on:pointerdown=move |_| {
-                                    tray_open.set(false);
+                                    open.set(false);
                                     wallpaper::clear(scene);
                                 }
                             >
