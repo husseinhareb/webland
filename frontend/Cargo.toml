@@ -36,7 +36,7 @@ console_error_panic_hook = "0.1"
 version = "0.3"
 # Widened as the frontend reaches for WebCodecs.
 features = [
-    "Window", "Document", "Element", "EventTarget", "Location", "DomRect", "CssStyleDeclaration",
+    "Window", "Document", "Element", "EventTarget", "Location", "DomRect", "CssStyleDeclaration", "Storage",
     "WebSocket", "BinaryType", "MessageEvent", "Event",
     "HtmlCanvasElement", "CanvasRenderingContext2d", "ImageData", "HtmlInputElement",
     "PointerEvent", "PointerEventInit", "MouseEvent", "MouseEventInit", "KeyboardEvent",

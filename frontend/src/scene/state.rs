@@ -14,6 +14,8 @@ use webland_protocol::{
 
 use crate::compositor::SurfaceRenderer;
 use crate::decode::Decoder;
+
+use super::remembered::{self, Placement};
 use crate::latency::Latency;
 
 use super::{ActiveResize, AltTabState, Grab, SnapZone, Toast, WindowState};
@@ -25,6 +27,8 @@ const CASCADE: i32 = 34;
 /// Told that a surface's frame is on screen, and whether that surface is one
 /// the user can see. See [`Scene::on_presented`].
 type Ack = Box<dyn Fn(SurfaceId, bool)>;
+/// Asks the compositor for a keyframe.
+type Keyframes = Box<dyn Fn()>;
 
 /// What actually paints a surface, once its canvas exists in the DOM.
 pub(super) struct View {
@@ -91,7 +95,9 @@ pub struct Scene {
     /// Asks the compositor for a keyframe. A decoder that has just been rebuilt
     /// has no reference frame, and every delta until the next keyframe is so
     /// much black.
-    pub(super) keyframes: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+    pub(super) keyframes: Rc<RefCell<Option<Keyframes>>>,
+    /// Where the windows of this tab sat before it was last reloaded.
+    pub(super) remembered: Rc<RefCell<HashMap<u64, Placement>>>,
     pub(super) latency: Rc<Latency>,
     pub(super) top: Rc<Cell<i32>>,
     pub(super) opened: Rc<Cell<i32>>,
@@ -100,6 +106,20 @@ pub struct Scene {
 impl Scene {
     #[must_use]
     pub fn new(latency: Rc<Latency>) -> Self {
+        let scene = Self::empty(latency);
+        // Every change to the window list is a change worth surviving a reload,
+        // and there is no one moment to hook: a move, a workspace send and a
+        // minimize are three different call sites. Watching the list catches
+        // all of them and anything added later.
+        //
+        // ponytail: that includes every frame of a drag. It is a few dozen
+        // bytes into `sessionStorage`; throttle it if a profile ever says so.
+        let windows = scene.windows;
+        Effect::new(move |_| windows.with(|open| remembered::save(open)));
+        scene
+    }
+
+    fn empty(latency: Rc<Latency>) -> Self {
         Self {
             windows: RwSignal::new(Vec::new()),
             applications: RwSignal::new(Vec::new()),
@@ -122,6 +142,7 @@ impl Scene {
             pending: Rc::new(RefCell::new(HashMap::new())),
             acks: Rc::new(RefCell::new(None)),
             keyframes: Rc::new(RefCell::new(None)),
+            remembered: Rc::new(RefCell::new(remembered::load())),
             latency,
             top: Rc::new(Cell::new(1)),
             opened: Rc::new(Cell::new(0)),
@@ -348,6 +369,13 @@ impl Scene {
             offset
         };
         self.top.set(self.top.get() + 1);
+        // A window the tab has seen before goes back where it was, which is
+        // what makes a reload a redraw rather than a reshuffle.
+        let remembered = created
+            .parent
+            .is_none()
+            .then(|| self.remembered.borrow().get(&id).copied())
+            .flatten();
         self.windows.update(|ws| {
             ws.push(WindowState {
                 id,
@@ -356,16 +384,17 @@ impl Scene {
                 image: (width, height),
                 content: created.content,
                 title: String::from("…"),
-                x: 40 + offset,
-                y: 40 + offset,
+                x: remembered.map_or(40 + offset, |placement| placement.x),
+                y: remembered.map_or(40 + offset, |placement| placement.y),
                 z: 0,
-                minimized: false,
+                minimized: remembered.is_some_and(|placement| placement.minimized),
                 parent: created.parent,
                 decorated: created.decorated,
                 // Where the user is looking. Launching something from
                 // workspace 3 and having it open on 1 is the behaviour
                 // nobody wants.
-                workspace: self.workspace.get_untracked(),
+                workspace: remembered
+                    .map_or_else(|| self.workspace.get_untracked(), |p| p.workspace),
                 restore: None,
                 pointer_locked: false,
                 snap: None,
