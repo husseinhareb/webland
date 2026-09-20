@@ -79,6 +79,8 @@ pub struct Scene {
     pub titlebar_drag: RwSignal<Option<(u64, Grab)>>,
     /// Active window titlebar context menu: (`window_id`, `client_x`, `client_y`)
     pub titlebar_menu: RwSignal<Option<(u64, f64, f64)>>,
+    /// Whether the application launcher menu is open.
+    pub launcher_open: RwSignal<bool>,
     pub(super) views: Rc<RefCell<HashMap<u64, View>>>,
     /// The latest frame for a surface whose canvas Leptos has not mounted yet.
     ///
@@ -138,6 +140,7 @@ impl Scene {
             resizing: RwSignal::new(None),
             titlebar_drag: RwSignal::new(None),
             titlebar_menu: RwSignal::new(None),
+            launcher_open: RwSignal::new(false),
             views: Rc::new(RefCell::new(HashMap::new())),
             pending: Rc::new(RefCell::new(HashMap::new())),
             acks: Rc::new(RefCell::new(None)),

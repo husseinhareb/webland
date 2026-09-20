@@ -26,10 +26,20 @@ pub fn Launcher(
     let search_ref: NodeRef<Input> = NodeRef::new();
 
     Effect::new(move |_| {
-        if open.get()
-            && let Some(input) = search_ref.get()
-        {
-            let _ = input.focus();
+        if open.get() {
+            filter.set(String::new());
+            selected.set(0);
+            if let Some(input) = search_ref.get() {
+                input.set_value("");
+                let _ = input.focus();
+            }
+            request_animation_frame(move || {
+                if let Some(input) = search_ref.get() {
+                    let _ = input.focus();
+                }
+            });
+        } else if let Some(input) = search_ref.get() {
+            let _ = input.blur();
         }
     });
 
@@ -62,24 +72,16 @@ pub fn Launcher(
         }
     };
 
-    let navigate = move |event: web_sys::KeyboardEvent| {
-        let len = matching().len();
-        match event.key().as_str() {
-            "ArrowDown" if len > 0 => selected.update(|i| *i = (*i + 1).min(len - 1)),
-            "ArrowUp" => selected.update(|i| *i = i.saturating_sub(1)),
-            "Enter" => {
-                if let Some(app) = matching().get(selected.get()) {
-                    launch(app.id);
-                }
+    let on_keydown = move |event: web_sys::KeyboardEvent| {
+        navigate(&event, matching().len(), selected, open, || {
+            if let Some(app) = matching().get(selected.get()) {
+                launch(app.id);
             }
-            "Escape" => open.set(false),
-            _ => return,
-        }
-        event.prevent_default();
+        });
     };
 
     view! {
-        <div class="menu" class:open=move || open.get()>
+        <div class="menu" class:open=move || open.get() on:pointerdown=move |e| keep_focus(&e, search_ref)>
             <input
                 node_ref=search_ref
                 class="search"
@@ -89,7 +91,7 @@ pub fn Launcher(
                     filter.set(input_value(&event));
                     selected.set(0);
                 }
-                on:keydown=navigate
+                on:keydown=on_keydown
             />
             <div class="results">
                 <For each=matching key=|app| app.id let:app>
@@ -124,6 +126,39 @@ pub fn Launcher(
             </div>
         </div>
     }
+}
+
+/// Keep DOM focus inside the search box when clicking non-button menu areas.
+fn keep_focus(event: &web_sys::PointerEvent, search_ref: NodeRef<Input>) {
+    if let Some(target) = event
+        .target()
+        .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+        && !target.tag_name().eq_ignore_ascii_case("INPUT")
+        && target.closest("button").ok().flatten().is_none()
+    {
+        event.prevent_default();
+        if let Some(input) = search_ref.get() {
+            let _ = input.focus();
+        }
+    }
+}
+
+/// Keyboard navigation in search results: arrow keys, Enter to launch, Escape to dismiss.
+fn navigate(
+    event: &web_sys::KeyboardEvent,
+    matching_len: usize,
+    selected: RwSignal<usize>,
+    open: RwSignal<bool>,
+    mut on_enter: impl FnMut(),
+) {
+    match event.key().as_str() {
+        "ArrowDown" if matching_len > 0 => selected.update(|i| *i = (*i + 1).min(matching_len - 1)),
+        "ArrowUp" => selected.update(|i| *i = i.saturating_sub(1)),
+        "Enter" => on_enter(),
+        "Escape" => open.set(false),
+        _ => return,
+    }
+    event.prevent_default();
 }
 
 /// The current text of an `<input>` an event came from.

@@ -24,6 +24,7 @@ pub fn Tasks(
     let current = scene.with_value(|scene| scene.workspace);
 
     let click = move |id: u64| {
+        scene.with_value(|s| s.launcher_open.set(false));
         let focused = scene.with_value(|s| s.focused.get() == Some(id));
         let minimized = scene.with_value(|s| {
             s.windows

@@ -68,6 +68,24 @@ pub fn install(scene: &Scene, transport: &Rc<WebSocketTransport>, latency: &Rc<L
                     return;
                 }
 
+                // Keys must not reach client windows when the launcher is open.
+                if scene.launcher_open.get_untracked() {
+                    if event.key() == "Escape" {
+                        event.prevent_default();
+                        scene.launcher_open.set(false);
+                        return;
+                    }
+                    if let Some(doc) = web_sys::window().and_then(|w| w.document())
+                        && let Some(el) =
+                            doc.query_selector("#webland-panel .search").ok().flatten()
+                        && let Ok(input) = el.dyn_into::<web_sys::HtmlInputElement>()
+                    {
+                        let _ = input.focus();
+                    }
+                    event.prevent_default();
+                    return;
+                }
+
                 // Escape closes the switcher; releasing alt commits it.
                 if event.code() == "Escape" && scene.alt_tab.get_untracked().is_some() {
                     event.prevent_default();
