@@ -13,13 +13,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
     tracing::info!(protocol = webland_protocol::VERSION, "webland: starting");
 
+    // The session's own bus, started before anything that speaks to it. The
+    // applications the compositor launches register their tray icons here, and
+    // the tray watches this same bus for exactly those registrations — the
+    // host's bus belongs to the host's desktop, where the watcher name is taken
+    // and where our applications are not.
+    let bus = webland_compositor::spawn::Bus::start();
+    if let Some(bus) = &bus {
+        tracing::info!(address = %bus.address(), "session bus");
+    } else {
+        tracing::warn!(
+            "no session bus: applications may open on the host desktop, and there is no tray"
+        );
+    }
+
     let (on_frame, poll_input) = if let Some(addr) = std::env::var("WEBLAND_WS")
         .ok()
         .and_then(|value| value.parse().ok())
     {
         let sink = transport::FrameSink::new();
         let (client_tx, mut client_rx) = tokio::sync::mpsc::unbounded_channel();
-        transport::spawn_server(addr, sink.clone(), client_tx);
+        transport::spawn_server(
+            addr,
+            sink.clone(),
+            client_tx,
+            bus.as_ref().map(|bus| bus.address().to_owned()),
+        );
 
         let on_frame = Box::new(move |message| sink.emit(message)) as Box<dyn Fn(_)>;
         // `try_recv` is synchronous and runtime-free, so the compositor's own
@@ -39,8 +58,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Headless makes the browser the only display; winit keeps a local window
     // (a visual ground-truth for debugging). Default to winit unless asked.
     if std::env::var_os("WEBLAND_HEADLESS").is_some() {
-        webland_compositor::run_headless(on_frame, poll_input)
+        webland_compositor::run_headless(on_frame, poll_input, bus.as_ref())
     } else {
-        webland_compositor::run_winit(on_frame, poll_input)
+        webland_compositor::run_winit(on_frame, poll_input, bus.as_ref())
     }
 }

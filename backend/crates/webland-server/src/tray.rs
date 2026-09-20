@@ -158,12 +158,17 @@ pub struct Tray {
 }
 
 impl Tray {
-    /// Bring up the watcher on the session bus and start following it.
+    /// Bring up the watcher on the session's own bus and start following it.
     ///
-    /// `None` when there is no session bus to serve on, or when something else
-    /// already owns the watcher name — neither is fatal, it only means no tray.
-    pub async fn start(sink: FrameSink) -> Option<Arc<Self>> {
-        Self::serve(ConnectionBuilder::session().ok()?, sink).await
+    /// `bus` is the bus the compositor points applications at. Watching any
+    /// other one is watching the wrong place: tray icons are registered by
+    /// those applications, on that bus, while the host's belongs to the host's
+    /// own desktop — which already has a panel holding the watcher name.
+    ///
+    /// `None` when the session has no bus of its own, which is not fatal: it
+    /// only means no tray.
+    pub async fn start(sink: FrameSink, bus: Option<&str>) -> Option<Arc<Self>> {
+        Self::serve(ConnectionBuilder::address(bus?).ok()?, sink).await
     }
 
     /// The same, on a bus the caller chose. Separate from [`Self::start`] only

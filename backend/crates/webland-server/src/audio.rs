@@ -48,12 +48,25 @@ impl Sink {
     /// before.
     #[must_use]
     pub fn create() -> Option<Self> {
+        // Whatever a previous run left behind. [`Drop`] takes the sink away
+        // when the server exits cleanly, and a server is almost never asked to
+        // exit cleanly — Ctrl-C and `SIGTERM` do not unwind — so without this
+        // the machine's mixer collects one dead "Webland" output per run.
+        //
+        // Safe to do unconditionally: the sink is named after this session, and
+        // only one session can own that name.
+        unload_stale();
         let output = Command::new("pactl")
             .args([
                 "load-module",
                 "module-null-sink",
                 &format!("sink_name={AUDIO_SINK}"),
-                "sink_properties=device.description=Webland",
+                // The process id goes on the sink so a later run can tell a
+                // sink whose server has died from one that is still in use.
+                &format!(
+                    "sink_properties=device.description=Webland {OWNER}={}",
+                    std::process::id()
+                ),
             ])
             .output()
             .inspect_err(|err| tracing::warn!(%err, "no pactl: session audio stays on the host"))
@@ -69,6 +82,59 @@ impl Sink {
         tracing::info!(sink = AUDIO_SINK, %module, "session audio sink");
         Some(Self { module })
     }
+}
+
+/// The property naming the server that owns a sink.
+const OWNER: &str = "device.webland.pid";
+
+/// Unload `webland` sinks whose server is gone.
+///
+/// A sink belonging to a server that is still running is left alone: two
+/// sessions at once is unusual, but taking the audio out from under one of them
+/// would be a strange way to start.
+///
+/// ponytail: the private bus leaks the same way — a `dbus-daemon` whose parent
+/// was killed keeps running until logout. It is idle and invisible, where a
+/// stray sink shows up in the machine's mixer; give it the same treatment if
+/// the strays ever become a nuisance.
+fn unload_stale() {
+    let Ok(modules) = Command::new("pactl")
+        .args(["list", "short", "modules"])
+        .output()
+    else {
+        return;
+    };
+    for line in String::from_utf8_lossy(&modules.stdout)
+        .lines()
+        .filter(|line| {
+            line.contains("module-null-sink") && line.contains(&format!("sink_name={AUDIO_SINK}"))
+        })
+    {
+        let Some(id) = line.split_whitespace().next() else {
+            continue;
+        };
+        if owner_of(line).is_some_and(is_running) {
+            continue;
+        }
+        tracing::info!(module = id, "unloading an audio sink left by a dead server");
+        let _ = Command::new("pactl").args(["unload-module", id]).status();
+    }
+}
+
+/// The process id recorded on a sink, if it carries one.
+fn owner_of(module: &str) -> Option<u32> {
+    module
+        .split(&format!("{OWNER}="))
+        .nth(1)?
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// Whether a process is still there to own its sink.
+fn is_running(pid: u32) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
 }
 
 impl Drop for Sink {
@@ -170,4 +236,21 @@ pub fn capture(to_browser: UnboundedSender<ServerMessage>) -> Option<Capture> {
         return None;
     }
     Some(Capture { ffmpeg })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::owner_of;
+
+    /// A sink with no owner recorded is one from before this existed, and is
+    /// treated as stale; a malformed one must not parse into somebody else's
+    /// process id.
+    #[test]
+    fn a_sink_says_which_server_owns_it() {
+        let line = "23\tmodule-null-sink\tsink_name=webland \
+                    sink_properties=device.description=Webland device.webland.pid=4213\t";
+        assert_eq!(owner_of(line), Some(4213));
+        assert_eq!(owner_of("7\tmodule-null-sink\tsink_name=webland\t"), None);
+        assert_eq!(owner_of("7\tsink_name=webland device.webland.pid=\t"), None);
+    }
 }

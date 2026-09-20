@@ -269,6 +269,7 @@ pub fn spawn_server(
     addr: SocketAddr,
     sink: FrameSink,
     client: mpsc::UnboundedSender<ClientMessage>,
+    bus: Option<String>,
 ) {
     let spawned = std::thread::Builder::new()
         .name("webland-ws".to_owned())
@@ -288,7 +289,7 @@ pub fn spawn_server(
                 // The tray is the session's, not a browser's: it is watched for
                 // as long as the server runs, and every connected browser is
                 // told the same list.
-                let tray = Tray::start(sink.clone()).await;
+                let tray = Tray::start(sink.clone(), bus.as_deref()).await;
 
                 let listener = match bind(addr).await {
                     Ok(listener) => listener,
@@ -383,7 +384,9 @@ mod tests {
             scratch.local_addr().unwrap()
         };
         let (client_tx, _client_rx) = mpsc::unbounded_channel();
-        spawn_server(addr, FrameSink::new(), client_tx);
+        // No bus: this test is about the socket, and a tray would only put a
+        // watcher on somebody else's session.
+        spawn_server(addr, FrameSink::new(), client_tx, None);
 
         // The server binds on a thread of its own; wait for the port to answer.
         let silent = loop {

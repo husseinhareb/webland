@@ -9,7 +9,11 @@
 //! desktop, and a launch on the host desktop opened one here, depending only on
 //! which copy happened to start first.
 //!
-//! So this starts a session bus of Webland's own and points every child at it.
+//! So the session runs a bus of its own and points every child at it. The bus
+//! is started by whoever starts the session — the server — rather than here,
+//! because the tray has to watch the same bus applications register their icons
+//! on, and a bus this module kept to itself would leave those two looking in
+//! different places.
 //! It is also what gets the keyring and polkit prompters onto our display: the
 //! bus activates them itself, and they inherit this environment like any other
 //! child.
@@ -42,13 +46,13 @@ pub struct Env {
     display: OsString,
     /// Our X display number, when `XWayland` is running.
     xdisplay: Option<u32>,
-    /// Our own session bus, when one could be started.
-    bus: Option<Bus>,
+    /// The session bus children are pointed at, when there is one.
+    bus: Option<String>,
 }
 
-/// A private `dbus-daemon`, alive for as long as this session.
+/// A private `dbus-daemon`, alive for as long as the session.
 #[derive(Debug)]
-struct Bus {
+pub struct Bus {
     address: String,
     child: Child,
     /// Held open only so the daemon never writes into a closed pipe.
@@ -56,26 +60,18 @@ struct Bus {
 }
 
 impl Env {
-    /// Point children at our Wayland socket, our X display, and a session bus
-    /// of our own.
+    /// Point children at our Wayland socket, our X display, and the session's
+    /// own bus.
     ///
-    /// A bus that cannot be started is not fatal — `dbus-daemon` need not be
-    /// installed — but it is worth saying out loud, because the symptom is
-    /// windows opening on the wrong desktop rather than anything failing.
+    /// The bus belongs to the caller rather than to this type: the tray has to
+    /// watch the same one applications register on, so the session starts it
+    /// once and hands it to both.
     #[must_use]
-    pub fn new(display: &OsStr, xdisplay: Option<u32>) -> Self {
-        let bus = Bus::start();
-        if let Some(bus) = &bus {
-            tracing::info!(address = %bus.address, "session bus");
-        } else {
-            tracing::warn!(
-                "no session bus of our own: single-instance applications may open on the host desktop"
-            );
-        }
+    pub fn new(display: &OsStr, xdisplay: Option<u32>, bus: Option<&Bus>) -> Self {
         Self {
             display: display.to_os_string(),
             xdisplay,
-            bus,
+            bus: bus.map(|bus| bus.address.clone()),
         }
     }
 
@@ -96,7 +92,7 @@ impl Env {
             None => command.env_remove("DISPLAY"),
         };
         match &self.bus {
-            Some(bus) => command.env("DBUS_SESSION_BUS_ADDRESS", &bus.address),
+            Some(address) => command.env("DBUS_SESSION_BUS_ADDRESS", address),
             // Better no bus than the host's: without one, an application starts
             // its own copy here instead of handing the window to the host's.
             None => command.env_remove("DBUS_SESSION_BUS_ADDRESS"),
@@ -106,11 +102,19 @@ impl Env {
 }
 
 impl Bus {
+    /// Where to reach this bus: what children are told, and what the tray
+    /// watches.
+    #[must_use]
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
     /// Start `dbus-daemon` and read the address it prints.
     ///
     /// `--nofork` so the daemon is our child and dies with us; the address
     /// arrives on its stdout as a single line before anything else is written.
-    fn start() -> Option<Self> {
+    #[must_use]
+    pub fn start() -> Option<Self> {
         let mut child = Command::new("dbus-daemon")
             .args(["--session", "--nofork", "--print-address"])
             .stdout(Stdio::piped())

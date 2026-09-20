@@ -2220,6 +2220,7 @@ fn tick_frame_callbacks(
 pub fn run_winit(
     on_frame: Option<Box<dyn Fn(ServerMessage)>>,
     mut poll_client: Option<Box<dyn FnMut() -> Option<ClientMessage>>>,
+    bus: Option<&spawn::Bus>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut display: Display<Webland> = Display::new()?;
     let dh = display.handle();
@@ -2313,7 +2314,7 @@ pub fn run_winit(
 
     // Everything launched from here on joins this session: our socket, our X
     // display, and a session bus that is ours rather than the host's.
-    let env = spawn::Env::new(&socket_name, state.xdisplay);
+    let env = spawn::Env::new(&socket_name, state.xdisplay, bus);
 
     if let Some(cmd) = std::env::var_os("WEBLAND_SPAWN") {
         match env.command(&cmd).spawn() {
@@ -2452,6 +2453,7 @@ pub fn run_winit(
 pub fn run_headless(
     on_frame: Option<Box<dyn Fn(ServerMessage)>>,
     mut poll_client: Option<Box<dyn FnMut() -> Option<ClientMessage>>>,
+    bus: Option<&spawn::Bus>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut display: Display<Webland> = Display::new()?;
     let dh = display.handle();
@@ -2570,7 +2572,7 @@ pub fn run_headless(
 
     // Everything launched from here on joins this session: our socket, our X
     // display, and a session bus that is ours rather than the host's.
-    let env = spawn::Env::new(&socket_name, state.xdisplay);
+    let env = spawn::Env::new(&socket_name, state.xdisplay, bus);
 
     if let Some(cmd) = std::env::var_os("WEBLAND_SPAWN") {
         match env.command(&cmd).spawn() {
