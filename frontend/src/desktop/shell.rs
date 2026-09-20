@@ -10,7 +10,7 @@ use webland_core::{Size, SurfaceId};
 use webland_protocol::{ClientMessage, encode};
 
 use crate::latency::Latency;
-use crate::scene::{Scene, SnapZone, pixel_ratio, pixels};
+use crate::scene::{Scene, SnapZone, pixel_ratio, pixels, whole_blocks};
 
 use super::chrome::{AltTabModal, ToastContainer};
 use super::connect::connect;
@@ -36,9 +36,12 @@ pub fn window_size() -> Option<Size> {
     let ratio = pixel_ratio();
     let width = window.inner_width().ok()?.as_f64()? * ratio * WINDOW_FRACTION;
     let height = window.inner_height().ok()?.as_f64()? * ratio * WINDOW_FRACTION;
+    // Whole macroblocks: a client that takes the size it is configured at is
+    // then encoded without padding, and padding is what Firefox's hardware
+    // decoder paints as a green strip (see `whole_blocks`).
     Some(Size {
-        width: pixels(width),
-        height: pixels(height),
+        width: whole_blocks(pixels(width)),
+        height: whole_blocks(pixels(height)),
     })
 }
 

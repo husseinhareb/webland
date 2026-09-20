@@ -9,7 +9,7 @@ use crate::protocol::WebSocketTransport;
 
 use super::{
     ActiveResize, MIN_SURFACE, ResizeDirection, Scene, SnapZone, coord, desktop_bounds,
-    drag_origin, maximized_size, pixel_ratio, pixels, workspace_at,
+    drag_origin, maximized_size, pixel_ratio, pixels, whole_blocks, workspace_at,
 };
 
 /// How close to an edge a titlebar drag has to get before it offers to snap.
@@ -68,8 +68,8 @@ impl Scene {
                 self.set_maximized_with_transport(id, true, transport);
             }
             SnapZone::Left => {
-                let half_w = pixels(vw * 0.5 * ratio);
-                let full_h = pixels(vh * ratio);
+                let half_w = whole_blocks(pixels(vw * 0.5 * ratio));
+                let full_h = whole_blocks(pixels(vh * ratio));
                 self.snap_to(id, SnapZone::Left, half_w, full_h, 0, 0);
                 if let Ok(frame) = encode(&ClientMessage::SetMaximized {
                     id: SurfaceId(id),
@@ -88,8 +88,8 @@ impl Scene {
                 }
             }
             SnapZone::Right => {
-                let half_w = pixels(vw * 0.5 * ratio);
-                let full_h = pixels(vh * ratio);
+                let half_w = whole_blocks(pixels(vw * 0.5 * ratio));
+                let full_h = whole_blocks(pixels(vh * ratio));
                 let x = coord(vw * 0.5);
                 self.snap_to(id, SnapZone::Right, half_w, full_h, x, 0);
                 if let Ok(frame) = encode(&ClientMessage::SetMaximized {
@@ -194,6 +194,17 @@ impl Scene {
         self.resizing.update(|r| finished = r.take());
         if let Some((id, _)) = finished {
             let (width, height) = self.window_size_of(id);
+            // Snapped to whole macroblocks at the moment the drag ends: the
+            // client is asked for a size it can be encoded at exactly, and the
+            // window's own box takes the same size so the shell is not left
+            // scaling the surface by a few pixels.
+            let (width, height) = (whole_blocks(width), whole_blocks(height));
+            self.windows.update(|ws| {
+                if let Some(window) = ws.iter_mut().find(|w| w.id == id) {
+                    window.width = width;
+                    window.height = height;
+                }
+            });
             if let Ok(frame) = encode(&ClientMessage::SetSize {
                 id: SurfaceId(id),
                 size: Size { width, height },

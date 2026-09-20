@@ -1786,6 +1786,10 @@ struct Tracked {
     /// This surface's own pacing. One clock for the whole desktop would let a
     /// busy window spend the frame callbacks owed to the quiet ones.
     clock: FrameClock,
+    /// The size of the buffer the client last committed, which is not always
+    /// the size the browser is shown: an encoded surface is announced at whole
+    /// macroblocks. Kept so a real resize can be told from a re-announce.
+    buffer: Option<Size>,
     /// The title the browser has been told, so an unchanged one costs nothing.
     title: Option<String>,
     /// The application id the browser has been told, likewise.
@@ -1859,6 +1863,7 @@ fn stream_dirty(
             Tracked {
                 id,
                 size: None,
+                buffer: None,
                 commits: Vec::new(),
                 pixels: Vec::new(),
                 encoder: None,
@@ -1932,6 +1937,55 @@ fn stream_dirty(
         // first buffer, and a resize or a keyframe re-sends this anyway.
         let decorates_itself = state.decorates_itself(surface);
 
+        // The encoder is built before the announce, not after, because what it
+        // can encode decides what the browser is told: an H.264 surface is
+        // whole macroblocks, and announcing the client's own size instead would
+        // leave the browser holding a canvas wider than any frame that arrives.
+        //
+        // H.264 first: it is the only codec that gets a scrolling terminal into
+        // a sane bitrate (gate 4).
+        let wanted = if dmabuf.is_some() {
+            encode::Input::Dmabuf
+        } else {
+            encode::Input::Cpu
+        };
+        // A client that switches buffer kinds needs a different graph entirely,
+        // and one that resizes needs the dimensions rebaked into both the
+        // filter graph and the codec.
+        let resized_buffer = tracked.buffer != Some(size);
+        tracked.buffer = Some(size);
+        if resized_buffer
+            || tracked
+                .encoder
+                .as_ref()
+                .is_some_and(|encoder| encoder.input() != wanted)
+        {
+            tracked.encoder = None;
+        }
+        if tracked.encoder.is_none() {
+            let (fourcc, modifier) = dmabuf
+                .as_ref()
+                .map_or((0, 0), |planes| (planes.fourcc, planes.modifier));
+            match encode::Encoder::new(
+                &render_node(),
+                size.width,
+                size.height,
+                bitrate(),
+                wanted,
+                fourcc,
+                modifier,
+            ) {
+                Ok(encoder) => tracked.encoder = Some(encoder),
+                Err(err) => tracing::debug!(%err, "no H.264 encoder; sending deflate"),
+            }
+        }
+        // What the browser will actually be shown: the encoder's picture where
+        // there is one, and the client's buffer where the pixel codecs take it.
+        let size = tracked.encoder.as_ref().map_or(size, |encoder| {
+            let (width, height) = encoder.size();
+            Size { width, height }
+        });
+
         // A resize invalidates whatever the browser is holding, and so does a
         // browser that has just joined: both take the whole surface.
         let resized = tracked.size != Some(size);
@@ -1958,15 +2012,6 @@ fn stream_dirty(
                 decorated: !decorates_itself,
             }));
         }
-        // Only a resize needs a new encoder — the filter graph and the codec
-        // both bake the dimensions in. A keyframe request does not: `announced`
-        // is passed to the encoder below and forces an IDR on the stream it
-        // already has. Rebuilding one per request meant a fresh VA-API context
-        // on every page load, and once those ran out encoding stopped dead.
-        if resized {
-            tracked.encoder = None;
-        }
-
         // After `SurfaceCreated`, never before: the browser hangs a title on a
         // window it already knows about, and one for a surface it has not been
         // told about yet is dropped. Cleared on announce for the same reason a
@@ -1997,40 +2042,8 @@ fn stream_dirty(
             }
         }
 
-        // H.264 first: it is the only codec that gets a scrolling terminal into
-        // a sane bitrate (gate 4). Damage is empty on this path — the encoder
-        // decides for itself what changed, and says so far better than a
-        // bounding box can.
-        let wanted = if dmabuf.is_some() {
-            encode::Input::Dmabuf
-        } else {
-            encode::Input::Cpu
-        };
-        // A client that switches buffer kinds needs a different graph entirely.
-        if tracked
-            .encoder
-            .as_ref()
-            .is_some_and(|e| e.input() != wanted)
-        {
-            tracked.encoder = None;
-        }
-        if tracked.encoder.is_none() {
-            let (fourcc, modifier) = dmabuf
-                .as_ref()
-                .map_or((0, 0), |planes| (planes.fourcc, planes.modifier));
-            match encode::Encoder::new(
-                &render_node(),
-                size.width,
-                size.height,
-                bitrate(),
-                wanted,
-                fourcc,
-                modifier,
-            ) {
-                Ok(encoder) => tracked.encoder = Some(encoder),
-                Err(err) => tracing::debug!(%err, "no H.264 encoder; sending deflate"),
-            }
-        }
+        // Damage is empty on the encoded path — the encoder decides for itself
+        // what changed, and says so far better than a bounding box can.
         if let Some(encoder) = tracked.encoder.as_mut() {
             let encoded = match (&dmabuf, pixels.as_ref()) {
                 (Some(p), _) => encoder.encode_dmabuf(&p.layout, p.fourcc, p.modifier, announced),
@@ -2066,6 +2079,12 @@ fn stream_dirty(
         if pixels.is_empty() {
             continue;
         }
+        // These pixels are the client's buffer, which is the size the client
+        // chose — not necessarily the size the browser was told about, since an
+        // encoded surface is announced at whole macroblocks. Rows are found at
+        // the buffer's own stride; rectangles are clipped to what the browser
+        // holds.
+        let buffer = tracked.buffer.unwrap_or(size);
         let whole = Rect {
             x: 0,
             y: 0,
@@ -2075,7 +2094,21 @@ fn stream_dirty(
         let region = if announced {
             whole
         } else {
-            match changed_region(&tracked.pixels, &pixels, size) {
+            match changed_region(&tracked.pixels, &pixels, buffer).and_then(|region| {
+                // Nothing to send if everything that changed lies in the strip
+                // the browser was never told about.
+                let (left, top) = (
+                    region.x.max(0).unsigned_abs(),
+                    region.y.max(0).unsigned_abs(),
+                );
+                let width = region.width.min(size.width.saturating_sub(left));
+                let height = region.height.min(size.height.saturating_sub(top));
+                (width > 0 && height > 0).then_some(Rect {
+                    width,
+                    height,
+                    ..region
+                })
+            }) {
                 Some(region) => region,
                 // Committed, but the pixels are identical: nothing to send.
                 None => continue,
@@ -2083,7 +2116,7 @@ fn stream_dirty(
         };
 
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        let payload = crop(&pixels, 0, (size.width * 4) as i32, region);
+        let payload = crop(&pixels, 0, (buffer.width * 4) as i32, region);
         tracked.pixels = pixels;
         emit(ServerMessage::SurfaceFrame(SurfaceFrame {
             id: tracked.id,

@@ -117,6 +117,18 @@ impl std::fmt::Debug for Encoder {
     }
 }
 
+/// How wide and tall one H.264 macroblock is.
+const MACROBLOCK: u32 = 16;
+
+/// A dimension rounded down to whole macroblocks.
+///
+/// The frontend rounds the sizes it asks clients for the same way, so the two
+/// ends agree on what a surface's size can be.
+#[must_use]
+pub const fn whole_blocks(value: u32) -> u32 {
+    value & !(MACROBLOCK - 1)
+}
+
 impl Encoder {
     /// Build an encoder for `width`x`height` BGRA input on the given render node.
     ///
@@ -132,14 +144,29 @@ impl Encoder {
         format: u32,
         modifier: u64,
     ) -> Result<Self, Error> {
-        // NV12's chroma plane is half size in both directions, so the encoded
-        // picture must be even. A client picks its own size — a terminal rounds
-        // to whole character cells — so odd sizes are normal and refusing them
-        // would drop those surfaces to the pixel codecs. Encode the even part
-        // instead and leave at most a one pixel edge unrefreshed.
-        let (encoded_width, encoded_height) = (width & !1, height & !1);
+        // Whole macroblocks, not merely even.
+        //
+        // H.264 codes in 16x16 blocks, so a picture that is not a multiple of
+        // 16 is coded at the next multiple up and carries cropping to say where
+        // it really ends. Decoders are supposed to honour that; Firefox's VA-API
+        // path paints the whole surface instead, and the padding it adds is
+        // never initialised — zeroed NV12, which is the bright green strip that
+        // appeared down the right of every window whose width was not a
+        // multiple of 16.
+        //
+        // So there is nothing to crop: encode the whole blocks that fit and
+        // announce *that* as the surface. A client picks its own size — a
+        // terminal rounds to whole character cells — so the cost is up to
+        // fifteen pixels of such a window's own edge padding, which is a great
+        // deal less than a green bar. Clients that take the size they are
+        // configured at lose nothing at all, because the browser asks for
+        // multiples of 16 (see the frontend's `aligned`).
+        let (encoded_width, encoded_height) = (whole_blocks(width), whole_blocks(height));
         if encoded_width == 0 || encoded_height == 0 {
-            return Err(Error("surface is too small to encode"));
+            // Smaller than one macroblock in either direction: a tooltip, a
+            // one-line menu. The pixel codecs have no alignment to keep and
+            // take these exactly as they are.
+            return Err(Error("surface is smaller than a macroblock"));
         }
         let mut enc = Encoder {
             device: std::ptr::null_mut(),
@@ -724,4 +751,30 @@ unsafe fn init_filter(ctx: *mut AVFilterContext, args: Option<&str>) -> Result<(
         return Err(Error("filter creation failed"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::whole_blocks;
+
+    /// The picture must never be larger than what whole macroblocks cover: an
+    /// encoder that rounded *up* would be coding pixels the client's buffer
+    /// does not have, and one that rounded to anything but 16 would leave the
+    /// stream carrying cropping again — which is the green edge this exists to
+    /// prevent.
+    #[test]
+    fn a_picture_is_always_whole_macroblocks_that_fit() {
+        assert_eq!(whole_blocks(1178), 1168);
+        assert_eq!(whole_blocks(555), 544);
+        assert_eq!(whole_blocks(1920), 1920);
+        // Smaller than one block: nothing to encode, and `Encoder::new` says so
+        // rather than building a zero-sized graph.
+        assert_eq!(whole_blocks(15), 0);
+        for value in 0..4096u32 {
+            let blocks = whole_blocks(value);
+            assert!(blocks <= value, "{blocks} > {value}");
+            assert_eq!(blocks % 16, 0, "{blocks} is not whole blocks");
+            assert!(value - blocks < 16, "{value} lost more than a block");
+        }
+    }
 }

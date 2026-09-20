@@ -81,8 +81,31 @@ pub fn maximized_size() -> Size {
     let (width, height) = desktop_bounds();
     let ratio = pixel_ratio();
     Size {
-        width: pixels(width * ratio),
-        height: pixels(height * ratio),
+        width: whole_blocks(pixels(width * ratio)),
+        height: whole_blocks(pixels(height * ratio)),
+    }
+}
+
+/// How wide and tall one H.264 macroblock is.
+pub const MACROBLOCK: u32 = 16;
+
+/// A size to ask a client to draw at, rounded down to whole macroblocks.
+///
+/// A picture that is not a multiple of 16 is coded at the next multiple up and
+/// cropped back, and a decoder that paints the padding instead of honouring the
+/// crop draws it as a bright green strip — which is what Firefox's hardware
+/// decoder does. The compositor keeps the same rule on its side, so a client
+/// that takes the size it is given produces no padding at all and loses
+/// nothing; one that insists on its own size (a terminal, which rounds to
+/// character cells) gives up the last few pixels of its edge instead.
+#[must_use]
+pub const fn whole_blocks(value: u32) -> u32 {
+    if value < MACROBLOCK {
+        // Smaller than a block: too small to encode, and the pixel codecs take
+        // it exactly as it is.
+        value
+    } else {
+        value & !(MACROBLOCK - 1)
     }
 }
 
