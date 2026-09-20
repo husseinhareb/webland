@@ -2,15 +2,15 @@
 //!
 //! Webland is a session of its own, not a window on the host's, and the thing
 //! that decides which of the two an application actually joins is the D-Bus
-//! session bus. A single-instance application — Thunar, Obsidian, anything
-//! Electron — asks the bus whether a copy of itself is already running as this
+//! session bus. A single-instance application, Thunar, Obsidian, anything
+//! Electron, asks the bus whether a copy of itself is already running as this
 //! user, and if one is, hands it the request and exits. Sharing the host's bus
 //! therefore meant a launch from the browser opened a window on the host
 //! desktop, and a launch on the host desktop opened one here, depending only on
 //! which copy happened to start first.
 //!
 //! So the session runs a bus of its own and points every child at it. The bus
-//! is started by whoever starts the session — the server — rather than here,
+//! is started by whoever starts the session (the server) rather than here,
 //! because the tray has to watch the same bus applications register their icons
 //! on, and a bus this module kept to itself would leave those two looking in
 //! different places.
@@ -81,7 +81,7 @@ impl Env {
         let mut command = Command::new(program);
         command.env("WAYLAND_DISPLAY", &self.display);
         // Toolkits pick their backend from this, and inherit `x11` verbatim when
-        // webland itself was started from an X session — which sends everything
+        // webland itself was started from an X session, which sends everything
         // the long way round through `XWayland`.
         command.env("XDG_SESSION_TYPE", "wayland");
         // Into the session's own sink, which is what gets its audio to the
@@ -167,7 +167,7 @@ mod tests {
     }
 
     /// Without a bus of our own, the host's must be taken away rather than
-    /// left in place — inheriting it is the bug this module exists for. The
+    /// left in place; inheriting it is the bug this module exists for. The
     /// same goes for `DISPLAY` with no `XWayland` running.
     #[test]
     fn nothing_of_the_host_session_is_inherited() {

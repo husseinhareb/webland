@@ -1,7 +1,7 @@
 //! WebSocket transport: the seam between the compositor and the browser.
 //!
 //! Frames are `webland-protocol` messages, `bincode`-encoded by the shared
-//! codec — the exact same `encode`/`decode` the WASM frontend runs. WebSocket
+//! codec; the exact same `encode`/`decode` the WASM frontend runs. WebSocket
 //! is the first transport; nothing here leaks into the message set, so
 //! WebTransport can replace it later.
 //!
@@ -30,7 +30,7 @@ use crate::tray::Tray;
 // nothing sent here is one: an H.264 delta frame references the frame before it,
 // and even a deflate frame carries just a damage rectangle. Dropping one leaves
 // the decoder applying deltas to a reference that never arrived, which looks
-// like half-drawn glyphs smeared across the window — and it only happens under
+// like half-drawn glyphs smeared across the window, and it only happens under
 // fast typing, when the credit runs out. Throttling by discarding is only ever
 // correct where a whole picture supersedes the last one.
 
@@ -84,7 +84,7 @@ impl Connection {
         self.outgoing.send(message).is_ok()
     }
 
-    /// A handle for pushing messages from somewhere other than the frame loop —
+    /// A handle for pushing messages from somewhere other than the frame loop;
     /// the audio capture, which produces on its own thread and at its own pace.
     #[must_use]
     pub fn sender(&self) -> mpsc::UnboundedSender<ServerMessage> {
@@ -109,8 +109,8 @@ pub async fn bind(addr: SocketAddr) -> std::io::Result<TcpListener> {
 ///
 /// Separate from accepting the socket because the handshake waits on the peer:
 /// it is the peer's HTTP request that is being read. Run inline in the accept
-/// loop, one connection that never sends that request — a port scanner, a proxy
-/// probe, a browser on a stalled network — holds the loop open and no other
+/// loop, one connection that never sends that request (a port scanner, a proxy
+/// probe, a browser on a stalled network) holds the loop open and no other
 /// browser can connect at all.
 async fn upgrade(
     stream: tokio::net::TcpStream,
@@ -262,8 +262,8 @@ async fn serve(
 /// Run a WebSocket server on a background thread.
 ///
 /// Each connected browser receives every frame the compositor pushes into
-/// `sink`, and everything it sends back — input, and the frame acks that pace
-/// `wl_surface.frame` (Decision 3) — is forwarded to the compositor on `client`.
+/// `sink`, and everything it sends back, input, and the frame acks that pace
+/// `wl_surface.frame` (Decision 3), is forwarded to the compositor on `client`.
 /// Enabled via the `WEBLAND_WS` env var so it never interferes with the window.
 pub fn spawn_server(
     addr: SocketAddr,

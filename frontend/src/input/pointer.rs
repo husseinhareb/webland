@@ -3,7 +3,7 @@
 //!
 //! Only the unlocked case is here: the browser routes the event, and the shell
 //! forwards what landed on a canvas and leaves its own chrome to Leptos. With the
-//! pointer locked there is no routing left to use — see [`super::locked`].
+//! pointer locked there is no routing left to use. See [`super::locked`].
 
 use std::cell::RefCell;
 use std::rc::Rc;

@@ -153,7 +153,7 @@ impl Scene {
     /// Set a window's box and position while a resize handle is being dragged.
     ///
     /// Only the box and origin. The canvas bitmap keeps the size the client last
-    /// rendered at, so CSS stretches the last frame for the length of the gesture —
+    /// rendered at, so CSS stretches the last frame for the length of the gesture;
     /// the client is told once, on release, and the sharp redraw comes back as a
     /// fresh `SurfaceCreated`.
     pub fn resize_and_move_to(&self, id: u64, width: u32, height: u32, x: i32, y: i32) {
@@ -202,8 +202,8 @@ impl Scene {
 
     /// Push a system toast notification that auto-dismisses after 3.5 seconds.
     pub fn show_toast(&self, title: impl Into<String>, message: Option<String>) {
-        // Counted, not clocked. Two toasts raised in the same millisecond —
-        // which is what a keyboard shortcut that raises two of them does — took
+        // Counted, not clocked. Two toasts raised in the same millisecond (
+        // which is what a keyboard shortcut that raises two of them does) took
         // the same wall-clock id, and `<For>` keys by id: the second replaced
         // the first, and the first one's dismissal timer then took both.
         static NEXT_TOAST: AtomicU64 = AtomicU64::new(0);

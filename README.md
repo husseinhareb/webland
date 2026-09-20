@@ -21,11 +21,11 @@ workspaces, Alt+Tab, edge snapping and a shared clipboard. X11 applications work
 through XWayland, which the compositor starts and manages itself.
 
 Applications play into a null sink of the session's own, which is streamed to
-the browser as Opus — the sound follows the desktop to whatever machine is
+the browser as Opus; the sound follows the desktop to whatever machine is
 watching it, and the host's own speakers stay the host's.
 
 The panel is a real `StatusNotifier` host on that bus, so applications that
-publish a tray icon — nm-applet, Steam, anything Electron — appear at the end of
+publish a tray icon (nm-applet, Steam, anything Electron) appear at the end of
 the bar with their own icon and their own menu.
 
 Not there yet: application notifications, a settings UI, and authentication. The protocol has no auth at all, so bind it to localhost and put
@@ -165,8 +165,8 @@ It lists what it finds in `.desktop` files, with their icons.
 
 Webland starts a D-Bus session bus of its own and every application it launches
 joins that one rather than the host desktop's. This is what keeps the two
-sessions apart: without it a single-instance application — Thunar, Obsidian,
-anything Electron — finds the copy already running outside and hands it the
+sessions apart: without it a single-instance application (Thunar, Obsidian,
+anything Electron) finds the copy already running outside and hands it the
 window, so a launch here opened something over there. The keyring and polkit
 prompters likewise start on our bus, and so appear in Webland rather than on the
 host desktop.
@@ -181,7 +181,7 @@ Firefox  = firefox --no-remote --profile ~/.webland/firefox
 Chromium = chromium --user-data-dir=~/.webland/chromium
 ```
 
-Create the directory first — Firefox will not make one whose parent is missing,
+Create the directory first; Firefox will not make one whose parent is missing,
 and says so in a dialog rather than on stderr.
 
 The name on the left need not be the entry's whole `Name=`. Any part of it will

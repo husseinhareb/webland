@@ -69,5 +69,5 @@ The reasoning behind these, and the order they get built in, is in
 
   Modifier state is reconciled per event against `getModifierState` rather than
   tracked from keydowns alone, because the browser eating one keydown would
-  otherwise leave a modifier stuck down for the client — the failure this
+  otherwise leave a modifier stuck down for the client: the failure this
   decision makes more likely, and cheap to defend against.

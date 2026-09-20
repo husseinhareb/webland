@@ -6,7 +6,7 @@
 //!
 //! Phase 1 ([`run_winit`]): render mapped surfaces into a window on the host
 //! desktop, so a real Wayland client can connect and be seen. No headless
-//! output, no browser, no streaming yet — that is Phase 2.
+//! output, no browser, no streaming yet; that is Phase 2.
 //!
 //! Adapted from smithay's `minimal` example, routed through
 //! `smithay::reexports::*` and kept free of `unsafe` (the workspace denies it,
@@ -174,7 +174,7 @@ pub struct Webland {
     /// Move, maximize and minimize asked for by a client's own titlebar, waiting
     /// to go to the browser, which owns where windows sit.
     requests: Vec<(ObjectId, WindowRequest)>,
-    /// Open popups — menus, tooltips, combobox lists — oldest first, so a
+    /// Open popups (menus, tooltips, combobox lists) oldest first, so a
     /// submenu always follows the menu it came from.
     popups: Vec<PopupSurface>,
     /// Needed to hand the seat a selection the browser owns.
@@ -182,7 +182,7 @@ pub struct Webland {
     /// The browser's clipboard, which is what clients are given when they paste.
     clipboard: String,
     /// Text copied by a client, on its way to the browser. A pipe read cannot
-    /// happen inline — the client writes when it feels like it — so the read
+    /// happen inline (the client writes when it feels like it) so the read
     /// runs on a thread and the answer arrives here.
     copied: std::sync::mpsc::Sender<String>,
     pastes: std::sync::mpsc::Receiver<String>,
@@ -201,8 +201,8 @@ impl CompositorHandler for Webland {
         &mut self.compositor_state
     }
 
-    /// The X server is a client the compositor never inserted — smithay does it,
-    /// with client data of smithay's own — so there are two places the state can
+    /// The X server is a client the compositor never inserted, smithay does it,
+    /// with client data of smithay's own, so there are two places the state can
     /// live and neither is a safe assumption.
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
         if let Some(data) = client.get_data::<XWaylandClientData>() {
@@ -216,7 +216,7 @@ impl CompositorHandler for Webland {
 
     fn commit(&mut self, surface: &WlSurface) {
         // This also moves the commit's damage into the surface's renderer
-        // state, converted to buffer coordinates — which is where
+        // state, converted to buffer coordinates, which is where
         // `damage_since` reads it, so nothing else needs doing here.
         on_commit_buffer_handler::<Self>(surface);
     }
@@ -244,7 +244,7 @@ impl XdgShellHandler for Webland {
             // and its rounded corners when an edge is tiled, because neither
             // makes sense against a neighbour. Without it the client's shadow
             // margin is part of the buffer, and a margin that is transparent to
-            // the client is opaque black once encoded — a black band around
+            // the client is opaque black once encoded, a black band around
             // every GTK window. Tiling compositors use exactly this trick.
             for edge in [
                 xdg_toplevel::State::TiledLeft,
@@ -261,8 +261,8 @@ impl XdgShellHandler for Webland {
     /// A menu, a tooltip, a combobox list: a surface the client places itself,
     /// against the window that opened it.
     ///
-    /// The positioner does the placing — anchor rectangle, gravity and offset,
-    /// all of it relative to the parent's window geometry — and smithay works
+    /// The positioner does the placing, anchor rectangle, gravity and offset,
+    /// all of it relative to the parent's window geometry, and smithay works
     /// the rectangle out. Nothing here constrains it to the screen: the browser
     /// knows where the parent window actually sits and the compositor does not.
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
@@ -279,7 +279,7 @@ impl XdgShellHandler for Webland {
 
     /// A popup asking for the pointer means a menu: it stays up until something
     /// outside it is clicked. That click arrives as a focus change from the
-    /// browser, so there is nothing to grab here — see [`dismiss_popups`].
+    /// browser, so there is nothing to grab here. See [`dismiss_popups`].
     fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
 
     /// The gestures a self-decorating client makes on its own titlebar.
@@ -308,7 +308,7 @@ impl XdgShellHandler for Webland {
             .push((surface.wl_surface().id(), WindowRequest::Minimize));
     }
 
-    /// The client moved a popup that is already up — a menu that would have run
+    /// The client moved a popup that is already up: a menu that would have run
     /// off the screen, usually.
     fn reposition_request(
         &mut self,
@@ -352,12 +352,12 @@ impl Webland {
     ///
     /// A client that never creates a decoration object has no way to be told the
     /// compositor decorates, and xdg-decoration says to assume it decorates
-    /// itself — which is exactly what GTK does, since it does not implement the
+    /// itself, which is exactly what GTK does, since it does not implement the
     /// protocol at all. The shell skips its chrome for these, or the window
     /// wears two titlebars.
     fn decorates_itself(&self, surface: &WlSurface) -> bool {
         // An X client never implements `xdg-decoration`; it says the same thing
-        // through `_MOTIF_WM_HINTS`, which is what `is_decorated` reads — and it
+        // through `_MOTIF_WM_HINTS`, which is what `is_decorated` reads, and it
         // reads it as "this window is client-side decorated", already the way
         // round this asks. Not negated: an X client says nothing about motif
         // hints far more often than not, and that silence means it wants the
@@ -390,7 +390,7 @@ impl DmabufHandler for Webland {
 
     // ponytail: accepts without importing. The renderer lives in `run_headless`,
     // not in this state, and the formats we advertise came from that same
-    // renderer — so a buffer that fails here would be a surprise. A failed
+    // renderer, so a buffer that fails here would be a surprise. A failed
     // import at capture time just skips the frame. Import here (and hold the
     // renderer in `Webland`) if clients ever start seeing silent black windows.
     fn dmabuf_imported(
@@ -424,8 +424,8 @@ impl SeatHandler for Webland {
     /// client and what a browser can draw without being sent a picture: the
     /// names are CSS's names.
     ///
-    /// ponytail: a client that sets a cursor surface instead — an older toolkit,
-    /// or one drawing a custom cursor — gets the arrow. Streaming that surface
+    /// ponytail: a client that sets a cursor surface instead, an older toolkit,
+    /// or one drawing a custom cursor, gets the arrow. Streaming that surface
     /// is another window's worth of machinery for a 24-pixel image; do it if a
     /// real application turns out to need it.
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
@@ -442,7 +442,7 @@ impl SeatHandler for Webland {
 }
 
 /// Cursor shapes cover tablet tools as well as pointers, and the protocol's
-/// delegate asks for both. There is no tablet here — the browser has a mouse —
+/// delegate asks for both. There is no tablet here (the browser has a mouse)
 /// so the defaults, which do nothing, are the whole implementation.
 impl smithay::wayland::tablet_manager::TabletSeatHandler for Webland {}
 
@@ -467,8 +467,8 @@ impl PointerConstraintsHandler for Webland {
     }
 }
 
-/// Text the clipboard is asked for in, best first. Anything else — an image, a
-/// list of files — is a copy the browser has no way to take, and is left alone.
+/// Text the clipboard is asked for in, best first. Anything else, an image, a
+/// list of files, is a copy the browser has no way to take, and is left alone.
 const TEXT_MIMES: [&str; 6] = [
     "text/plain;charset=utf-8",
     "text/plain",
@@ -486,7 +486,7 @@ const MAX_CLIPBOARD: u64 = 1024 * 1024;
 ///
 /// Order matters: a client that offers both `text/plain` and the utf-8 spelling
 /// means the same bytes either way, but one that offers both and means different
-/// encodings is answering in whichever was asked for — so ask for the one whose
+/// encodings is answering in whichever was asked for, so ask for the one whose
 /// encoding is not a guess.
 fn preferred_mime(offered: &[String]) -> Option<&'static str> {
     TEXT_MIMES
@@ -500,7 +500,7 @@ impl SelectionHandler for Webland {
     /// A client copied something. Read it, so the browser can have it too.
     ///
     /// The client writes into a pipe whenever it gets round to it, so the read
-    /// happens on a thread of its own — blocking the compositor on an
+    /// happens on a thread of its own; blocking the compositor on an
     /// application's copy would stop every window on the desktop.
     fn new_selection(
         &mut self,
@@ -547,7 +547,7 @@ impl SelectionHandler for Webland {
 
     /// A client is pasting: hand it whatever the browser last had.
     ///
-    /// On a thread for the same reason as the read — a client that asks for the
+    /// On a thread for the same reason as the read; a client that asks for the
     /// selection and then does not read the pipe would otherwise block the
     /// compositor once the text outgrew the pipe's buffer.
     fn send_selection(
@@ -667,7 +667,7 @@ fn inject_input(
         InputEvent::PointerMotion { position, .. } => {
             // The browser points at a pixel of the image it was sent; the client
             // is owed a point in its own surface. Those differ by wherever the
-            // image was cut from — nothing for a client sent its whole buffer,
+            // image was cut from: nothing for a client sent its whole buffer,
             // the shadow margin for one that was cropped to its window, which is
             // a pointer landing a margin's width from where it was pointed.
             let (origin_x, origin_y) = image_origin(surface);
@@ -765,7 +765,7 @@ fn inject_input(
             let code: Keycode = (keycode + 8).into();
             // Only when it actually changes. xkb refcounts a modifier's press,
             // so a second `Down` for a key already held leaves the modifier set
-            // after the matching `Up` — and with no pressed key left to show for
+            // after the matching `Up`, and with no pressed key left to show for
             // it, nothing can see it, let alone clear it. The result is a shift
             // or a control that is on for the rest of the compositor's life:
             // letters turn into chords the client answers with a shortcut, and
@@ -773,7 +773,7 @@ fn inject_input(
             //
             // Duplicates are ordinary, not exotic: the browser auto-repeats a
             // held key, and it re-reports a modifier the page missed the release
-            // of. Neither is wanted — repeat is the client's own job, from the
+            // of. Neither is wanted; repeat is the client's own job, from the
             // `wl_keyboard.repeat_info` it was given.
             if keyboard.pressed_keys().contains(&code) == (press == Press::Down) {
                 return;
@@ -785,8 +785,8 @@ fn inject_input(
         InputEvent::PointerScroll { dx, dy, .. } => {
             // An axis event has no surface of its own: it goes wherever the
             // pointer's focus is. A wheel turned over a window the pointer has
-            // not moved across since it was last raised — parked there, or over
-            // a window that just appeared underneath it — would otherwise land
+            // not moved across since it was last raised, parked there, or over
+            // a window that just appeared underneath it, would otherwise land
             // in whatever was focused before, so the focus is taken first.
             if pointer.current_focus().as_ref() != Some(surface) {
                 pointer.motion(
@@ -801,7 +801,7 @@ fn inject_input(
             }
             // The browser sends pixels. Clients want both: the continuous value
             // for smooth scrolling, and v120 steps for the ones that only move
-            // by whole notches — 120 being one notch, as the wheel protocol has
+            // by whole notches: 120 being one notch, as the wheel protocol has
             // it. Sending neither is why nothing scrolled at all.
             let mut frame = AxisFrame::new(time).source(AxisSource::Wheel);
             for (axis, delta) in [(Axis::Horizontal, dx), (Axis::Vertical, dy)] {
@@ -842,10 +842,10 @@ const INITIAL_FRAME_CREDIT: i32 = 2;
 
 /// Fire callbacks this often even with no credit, so clients still make progress
 /// when no browser is attached (otherwise nothing ever renders, nothing is ever
-/// sent, and no ack can arrive — a deadlock).
+/// sent, and no ack can arrive, a deadlock).
 const IDLE_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// The frame interval the pipe is sized against — 60Hz.
+/// The frame interval the pipe is sized against, 60Hz.
 const FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 
 /// The most frames allowed in flight, however long the round trip.
@@ -899,7 +899,7 @@ impl FrameClock {
     /// The browser presented a frame, so one more redraw is warranted.
     ///
     /// The ceiling on in-flight frames is the round trip divided by the frame
-    /// interval — the number of frames that fit in the pipe before the first ack
+    /// interval: the number of frames that fit in the pipe before the first ack
     /// can possibly return. A fixed ceiling of two is right on loopback and
     /// crippling anywhere else: over a tunnel with an 80ms round trip it caps
     /// the desktop at 25 frames a second however fast the encoder runs, because
@@ -981,7 +981,7 @@ fn changed_region(old: &[u8], new: &[u8], size: Size) -> Option<Rect> {
 /// The browser reports `KeyboardEvent.code`, which is a physical key position
 /// and says nothing about what is printed on it: the key labelled A on an AZERTY
 /// keyboard reports `KeyQ`. Turning that into a letter is xkb's job, and it can
-/// only do it with the right layout — with the default it silently assumes US
+/// only do it with the right layout, with the default it silently assumes US
 /// and every French keyboard types `q` for `a`.
 ///
 /// Taken from the host, because the keyboard is a real one plugged into this
@@ -1022,7 +1022,7 @@ fn host_layout() -> Option<String> {
 ///
 /// A compositor with no `wl_output` is legal on the wire and useless in
 /// practice. GTK draws anyway, but `WebKit` asks GDK which monitor its window is
-/// on before it will composite, gets none, and never paints — a Tauri or GNOME
+/// on before it will composite, gets none, and never paints; a Tauri or GNOME
 /// Web window that loads and runs its page into a blank rectangle. The mode is
 /// whatever size the browser last reported, so a resize moves the monitor with
 /// it.
@@ -1046,7 +1046,7 @@ fn browser_output(dh: &DisplayHandle, size: (i32, i32)) -> Output {
 /// Point the output at a new size, as a monitor changing mode.
 fn set_output_mode(output: &Output, (width, height): (i32, i32)) {
     // 60 Hz in millihertz: a number clients divide by, not one anything here
-    // paces to — the browser's acks are the real clock.
+    // paces to; the browser's acks are the real clock.
     let mode = Mode {
         size: (width, height).into(),
         refresh: 60_000,
@@ -1073,8 +1073,8 @@ fn configured_size() -> (i32, i32) {
 /// Bring up a GLES renderer on the render node, for clients that hand us GPU
 /// buffers instead of shared memory.
 ///
-/// Returns the renderer and the node's device id, or `None` — with a warning,
-/// not an error — if there is no usable render node: `wl_shm` clients still work
+/// Returns the renderer and the node's device id, or `None`, with a warning,
+/// not an error, if there is no usable render node: `wl_shm` clients still work
 /// without one, they are just the slow path. `--example gpu_probe` is the quick
 /// way to find out why this failed.
 fn open_gpu() -> Option<(GlesRenderer, u64)> {
@@ -1193,7 +1193,7 @@ fn dmabuf_planes(surface: &WlSurface) -> Option<Planes> {
 /// Copy a surface's committed contents, tightly packed, whichever kind of buffer
 /// the client committed.
 fn capture(renderer: Option<&mut GlesRenderer>, surface: &WlSurface) -> Option<(Size, Vec<u8>)> {
-    // A client with subsurfaces has to be composited, which needs a renderer —
+    // A client with subsurfaces has to be composited, which needs a renderer,
     // so under winit, which has none to spare here, such a window sends nothing.
     if !get_children(surface).is_empty() {
         return capture_tree(renderer?, surface);
@@ -1227,7 +1227,7 @@ fn window_geometry(surface: &WlSurface) -> Option<Rectangle<i32, Logical>> {
 /// Where a surface hangs, if it is a popup rather than a window.
 ///
 /// The offset is the popup's own geometry, which the positioner already
-/// expressed relative to the parent's window geometry — the same rectangle the
+/// expressed relative to the parent's window geometry, the same rectangle the
 /// browser clips the parent to, so the two agree about where the corner is.
 fn popup_anchor(
     state: &Webland,
@@ -1251,7 +1251,7 @@ fn popup_anchor(
 ///
 /// This is what a pointer grab would do in a compositor that took one: a menu
 /// stays up until something outside it is clicked, and then it goes. The chain
-/// matters — clicking a submenu must not close the menu it opened from — so
+/// matters (clicking a submenu must not close the menu it opened from) so
 /// what survives is the focused surface and its ancestors.
 fn dismiss_popups(state: &mut Webland, focused: Option<ObjectId>) {
     let keep = ancestry(focused, |id| {
@@ -1348,12 +1348,12 @@ fn clip(offset: (i32, i32), size: (i32, i32), image: Size) -> Rect {
 
 /// Composite a surface and its subsurfaces into one image.
 ///
-/// A client with client-side decorations — every GTK app, Firefox among them —
+/// A client with client-side decorations (every GTK app, Firefox among them)
 /// commits only the shadow frame to its toplevel and puts the window's actual
 /// contents in a subsurface. Reading the toplevel's own buffer therefore gives
 /// a black window, so render the whole tree and read that back instead.
 ///
-/// ponytail: a texture allocated per frame, then read back to the CPU — which
+/// ponytail: a texture allocated per frame, then read back to the CPU, which
 /// costs such a client the zero-copy path, landing it on the CPU encoder like an
 /// shm client. Rendering into one gbm-allocated dmabuf held across frames and
 /// handing the encoder its fds is the upgrade.
@@ -1407,8 +1407,8 @@ fn capture_tree(renderer: &mut GlesRenderer, surface: &WlSurface) -> Option<(Siz
 
 /// Every commit counter in a surface tree.
 ///
-/// A desynchronised subsurface — which is how a decorated client draws its next
-/// frame — commits without touching the toplevel, so watching the toplevel's own
+/// A desynchronised subsurface, which is how a decorated client draws its next
+/// frame, commits without touching the toplevel, so watching the toplevel's own
 /// counter would freeze the window on whatever it showed first.
 fn tree_commits(root: &WlSurface) -> Vec<CommitCounter> {
     let mut commits = Vec::new();
@@ -1433,7 +1433,7 @@ fn tree_commits(root: &WlSurface) -> Vec<CommitCounter> {
 /// Copy a surface's committed dmabuf contents by way of the GPU.
 ///
 /// ponytail: this reads the buffer back to the CPU, which is precisely what
-/// Decision 2 forbids — the frame then goes down the same Deflate path as an
+/// Decision 2 forbids; the frame then goes down the same Deflate path as an
 /// shm one. It exists so that advertising the dmabuf global does not black out
 /// every client that takes it up. Deleted when VA-API encodes from the dmabuf
 /// directly, which is the actual gate.
@@ -1455,7 +1455,7 @@ fn capture_dmabuf(renderer: &mut GlesRenderer, surface: &WlSurface) -> Option<(S
 
 /// Copy a surface's committed `wl_shm` contents, tightly packed.
 ///
-/// Returns `None` if the surface has no buffer, or a buffer that is not shm —
+/// Returns `None` if the surface has no buffer, or a buffer that is not shm:
 /// `capture_dmabuf` handles the latter.
 fn capture_shm(surface: &WlSurface) -> Option<(Size, Vec<u8>)> {
     with_renderer_surface_state(surface, |renderer_state| {
@@ -1486,7 +1486,7 @@ fn capture_shm(surface: &WlSurface) -> Option<(Size, Vec<u8>)> {
 /// Pack `region` out of a strided BGRA buffer into tightly-packed rows.
 ///
 /// Returns empty if the buffer is shorter than the region implies, rather than
-/// reading past it — the pool is client-controlled memory.
+/// reading past it; the pool is client-controlled memory.
 #[allow(clippy::cast_sign_loss)]
 fn crop(bytes: &[u8], offset: i32, stride: i32, region: Rect) -> Vec<u8> {
     let (offset, stride) = (offset.max(0) as usize, stride.max(0) as usize);
@@ -1635,7 +1635,7 @@ fn drain_client(
     for (id, size) in maximizing {
         let Some(toplevel) = toplevel_for(state, known, id) else {
             // An X window is told a size and nothing else. `set_maximized`
-            // exists, but it sets a hint the client reads back — the size is
+            // exists, but it sets a hint the client reads back; the size is
             // what actually makes it redraw, and restoring means the size the
             // browser is showing rather than one the client remembers.
             if let Some(window) = x11_for_id(state, known, id) {
@@ -1661,7 +1661,7 @@ fn drain_client(
 
     // A resize grip is the same configure, minus the state: the client is told
     // a size and redraws at it. Maximized comes off, because a window the user
-    // has just dragged to a size of their own is not maximized any more — and a
+    // has just dragged to a size of their own is not maximized any more, and a
     // client left flagged maximized would keep drawing as if it were.
     for (id, size) in sizing {
         let Some(toplevel) = toplevel_for(state, known, id) else {
@@ -1705,7 +1705,7 @@ fn drain_client(
     // Over everything that is streamed, not over the toplevels: a popup and an
     // X window are both surfaces the browser shows and the user clicks, and
     // looking only where `xdg_shell` keeps its windows meant an X client was
-    // sent every frame and handed no click or keystroke back — Steam, and
+    // sent every frame and handed no click or keystroke back, Steam, and
     // everything else that never grew a Wayland backend, drawn but dead.
     let focused = state.focus.and_then(|id| object_for(known, id));
     let surfaces = streamed_surfaces(state);
@@ -1736,7 +1736,7 @@ fn drain_client(
     for event in events {
         // The pointer follows the cursor. A motion or a wheel names the
         // surface the browser delivered it to, which is the window under the
-        // cursor and not necessarily the focused one — sending it to the focus
+        // cursor and not necessarily the focused one, sending it to the focus
         // instead meant an unfocused window never saw `pointer.enter`, never
         // highlighted anything under the cursor and never scrolled, while the
         // focused one was silently pointed at coordinates from another window.
@@ -1774,8 +1774,8 @@ fn pointer_surface(event: &InputEvent) -> Option<SurfaceId> {
 struct Tracked {
     id: SurfaceId,
     size: Option<Size>,
-    /// The commits the browser's pixels came from — one per surface in the
-    /// tree — so an untouched window costs nothing to skip.
+    /// The commits the browser's pixels came from, one per surface in the
+    /// tree, so an untouched window costs nothing to skip.
     commits: Vec<CommitCounter>,
     /// The pixels the browser is holding, to diff the next capture against.
     /// Only the deflate path needs these; H.264 keeps its own reference frames.
@@ -1852,7 +1852,7 @@ fn stream_dirty(
     let toplevels = streamed_surfaces(state);
     for surface in &toplevels {
         // Read before the surface is tracked, because both want `known` and the
-        // parent's id has to be in it already — it is, since a popup cannot be
+        // parent's id has to be in it already; it is, since a popup cannot be
         // mapped before the surface it hangs from.
         let anchor = popup_anchor(state, known, surface);
         let mut is_new = false;
@@ -2015,7 +2015,7 @@ fn stream_dirty(
         // After `SurfaceCreated`, never before: the browser hangs a title on a
         // window it already knows about, and one for a surface it has not been
         // told about yet is dropped. Cleared on announce for the same reason a
-        // keyframe resends pixels — a browser that just arrived has heard
+        // keyframe resends pixels; a browser that just arrived has heard
         // nothing, whatever the last one was told.
         if announced {
             tracked.title = None;
@@ -2042,7 +2042,7 @@ fn stream_dirty(
             }
         }
 
-        // Damage is empty on the encoded path — the encoder decides for itself
+        // Damage is empty on the encoded path; the encoder decides for itself
         // what changed, and says so far better than a bounding box can.
         if let Some(encoder) = tracked.encoder.as_mut() {
             let encoded = match (&dmabuf, pixels.as_ref()) {
@@ -2080,7 +2080,7 @@ fn stream_dirty(
             continue;
         }
         // These pixels are the client's buffer, which is the size the client
-        // chose — not necessarily the size the browser was told about, since an
+        // chose, not necessarily the size the browser was told about, since an
         // encoded surface is announced at whole macroblocks. Rows are found at
         // the buffer's own stride; rectangles are clipped to what the browser
         // holds.
@@ -2161,8 +2161,8 @@ fn bitrate() -> i64 {
 /// Every surface the browser is shown: windows, the menus they open, and the
 /// windows that came from X.
 ///
-/// One list, because two things walk it — the capture that sends pixels and the
-/// frame clock that asks for the next ones — and a surface in one but not the
+/// One list, because two things walk it, the capture that sends pixels and the
+/// frame clock that asks for the next ones, and a surface in one but not the
 /// other is a window that either freezes or is never drawn.
 fn streamed_surfaces(state: &Webland) -> Vec<WlSurface> {
     let mut surfaces: Vec<WlSurface> = state
@@ -2173,13 +2173,13 @@ fn streamed_surfaces(state: &Webland) -> Vec<WlSurface> {
         .collect();
     surfaces.extend(state.popups.iter().map(|popup| popup.wl_surface().clone()));
     // An X window is a window like any other once it has a surface: captured,
-    // encoded and paced down the same path. Everything above it differs — it is
-    // configured in X and told to close in X — but none of that is pixels.
+    // encoded and paced down the same path. Everything above it differs, it is
+    // configured in X and told to close in X, but none of that is pixels.
     surfaces.extend(state.x11.iter().filter_map(X11Surface::wl_surface));
     surfaces
 }
 
-/// Fire frame callbacks so every mapped client renders its next frame — but only
+/// Fire frame callbacks so every mapped client renders its next frame, but only
 /// when [`FrameClock`] says the browser is ready for one.
 fn tick_frame_callbacks(
     state: &Webland,
@@ -2202,7 +2202,7 @@ fn tick_frame_callbacks(
 /// Run the compositor with a winit-backed output: a window on the host desktop.
 ///
 /// Binds a fresh `wayland-N` socket (never `wayland-0`, and distinct from the
-/// session's own display), prints its name, and — if `WEBLAND_SPAWN` is set —
+/// session's own display), prints its name, and (if `WEBLAND_SPAWN` is set)
 /// launches that command with `WAYLAND_DISPLAY` pointed at us.
 ///
 /// # Errors
@@ -2210,7 +2210,7 @@ fn tick_frame_callbacks(
 /// be created, or if client dispatch fails.
 ///
 /// `on_frame`, when present, receives a [`ServerMessage`] for every surface that
-/// appears and for every redraw — the seam that feeds the browser transport.
+/// appears and for every redraw, the seam that feeds the browser transport.
 /// (The frame payloads are placeholders until per-surface capture lands; this
 /// wiring proves the compositor → transport → browser path end to end.)
 ///
@@ -2237,11 +2237,11 @@ pub fn run_winit(
     let dmabuf_state = DmabufState::new();
     let xdg_shell_state = XdgShellState::new::<Webland>(&dh);
     // The global is registered on the display, not held by the returned value,
-    // and nothing here reads it back — it exists so clients can ask, and are
+    // and nothing here reads it back; it exists so clients can ask, and are
     // told the shell decorates.
     let _decoration = XdgDecorationState::new::<Webland>(&dh);
     // Cursor shapes by name. Without this global a client has no way to ask for
-    // one, and falls back to committing a themed image as a surface — which is
+    // one, and falls back to committing a themed image as a surface, which is
     // a picture the browser is never sent, so every application would be stuck
     // with the arrow the browser draws.
     let _cursor_shape = CursorShapeManagerState::new::<Webland>(&dh);
@@ -2307,7 +2307,7 @@ pub fn run_winit(
     // Before anything is launched: an X client reads `DISPLAY` once, at startup,
     // and a client started before the X server would never see it. Skipped
     // entirely when no X server was spawned, or the wait is a timeout nothing
-    // can end — five seconds of nothing on every machine without XWayland.
+    // can end, five seconds of nothing on every machine without XWayland.
     if xwayland_starting {
         xwayland::wait_ready(&mut event_loop, &mut display, &mut state);
     }
@@ -2426,7 +2426,7 @@ pub fn run_winit(
 
         if let Some(stream) = listener.accept()? {
             // The handle is dropped: the display owns the connection, and the
-            // `Vec` these used to be pushed into only ever grew — one entry per
+            // `Vec` these used to be pushed into only ever grew, one entry per
             // client that had ever connected, live or long gone.
             display
                 .handle()
@@ -2443,7 +2443,7 @@ pub fn run_winit(
 
 /// Run the compositor headless: no local window, the browser is the only display.
 ///
-/// A renderer-free Wayland event loop — shm clients are captured directly and
+/// A renderer-free Wayland event loop; shm clients are captured directly and
 /// streamed, so no GLES/EGL context is needed. Frame callbacks are driven at
 /// ~60Hz, which is what paces client rendering in the absence of an output.
 ///
@@ -2474,8 +2474,8 @@ pub fn run_headless(
     // gives up, and the client silently falls back to wl_shm.
     if let Some((renderer, device)) = gpu.as_ref() {
         // Advertise only what the encoder can actually take. Left to itself Mesa
-        // picks a compressed AMD modifier, which arrives as two planes — pixels
-        // plus DCC metadata — in two buffer objects, and VA-API will only map a
+        // picks a compressed AMD modifier, which arrives as two planes, pixels
+        // plus DCC metadata, in two buffer objects, and VA-API will only map a
         // frame made from one. Offering LINEAR alone makes the client allocate
         // something importable, so the zero-copy path is available at all.
         //
@@ -2495,11 +2495,11 @@ pub fn run_headless(
     let mut renderer = gpu.map(|(renderer, _)| renderer);
     let xdg_shell_state = XdgShellState::new::<Webland>(&dh);
     // The global is registered on the display, not held by the returned value,
-    // and nothing here reads it back — it exists so clients can ask, and are
+    // and nothing here reads it back; it exists so clients can ask, and are
     // told the shell decorates.
     let _decoration = XdgDecorationState::new::<Webland>(&dh);
     // Cursor shapes by name. Without this global a client has no way to ask for
-    // one, and falls back to committing a themed image as a surface — which is
+    // one, and falls back to committing a themed image as a surface, which is
     // a picture the browser is never sent, so every application would be stuck
     // with the arrow the browser draws.
     let _cursor_shape = CursorShapeManagerState::new::<Webland>(&dh);
@@ -2565,7 +2565,7 @@ pub fn run_headless(
     // Before anything is launched: an X client reads `DISPLAY` once, at startup,
     // and a client started before the X server would never see it. Skipped
     // entirely when no X server was spawned, or the wait is a timeout nothing
-    // can end — five seconds of nothing on every machine without XWayland.
+    // can end, five seconds of nothing on every machine without XWayland.
     if xwayland_starting {
         xwayland::wait_ready(&mut event_loop, &mut display, &mut state);
     }
@@ -2597,7 +2597,7 @@ pub fn run_headless(
         let pass_started = std::time::Instant::now();
         if let Some(stream) = listener.accept()? {
             // The handle is dropped: the display owns the connection, and the
-            // `Vec` these used to be pushed into only ever grew — one entry per
+            // `Vec` these used to be pushed into only ever grew, one entry per
             // client that had ever connected, live or long gone.
             display
                 .handle()

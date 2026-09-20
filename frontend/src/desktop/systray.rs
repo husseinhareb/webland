@@ -4,7 +4,7 @@
 //! `StatusNotifierItem` on the session bus, the server watches that bus and
 //! sends over a picture and a label, and this draws them at the end of the
 //! panel. A click goes back as the item's own action; the right button asks for
-//! its menu, which is fetched when it is opened rather than kept — a tray menu
+//! its menu, which is fetched when it is opened rather than kept; a tray menu
 //! says what an application is doing *now*.
 //!
 //! Nothing here knows what an item is. The `id` is the server's handle for it
@@ -35,7 +35,7 @@ pub fn SystemTray(
         }
     };
 
-    // One menu at a time, and a second click on the same icon closes it — a
+    // One menu at a time, and a second click on the same icon closes it; a
     // tray icon is a toggle, not a one-way door.
     let open_menu = move |id: String| {
         if menu.get_untracked().is_some_and(|(open, _)| open == id) {

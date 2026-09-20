@@ -3,7 +3,7 @@
 //! The compositor streams its own audio sink as WebM/Opus (see the server's
 //! `audio` module), and this is the other end: a `MediaSource` fed by the
 //! protocol, playing through an `<audio>` element that never appears on the
-//! page. Nothing here decodes anything — the browser does, from the stream's
+//! page. Nothing here decodes anything; the browser does, from the stream's
 //! own header, which is why the bytes are opaque all the way through the
 //! protocol.
 //!

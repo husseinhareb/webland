@@ -85,12 +85,12 @@ pub enum Codec {
 pub struct Application {
     pub id: u32,
     pub name: String,
-    /// The `.desktop` file's basename — `firefox`, `org.gnome.Nautilus` — which
+    /// The `.desktop` file's basename (`firefox`, `org.gnome.Nautilus`), which
     /// is also what a Wayland client reports as its `app_id`. It is the only
     /// thing the two sides have in common, and so the only way the panel can
     /// put an application's icon on its window's task button.
     pub app_id: String,
-    /// The application's icon as a `data:` URL, when one was found — the
+    /// The application's icon as a `data:` URL, when one was found; the
     /// launcher is a list a person reads, and it reads faster with pictures.
     pub icon: Option<String>,
 }
@@ -105,7 +105,7 @@ pub struct TrayItem {
     pub id: String,
     /// What the item calls itself, for a tooltip. Often empty.
     pub title: String,
-    /// The icon as a `data:` URL — the item's own pixmap re-encoded, or the
+    /// The icon as a `data:` URL; the item's own pixmap re-encoded, or the
     /// file its icon name resolved to in the icon theme.
     pub icon: Option<String>,
 }
@@ -131,7 +131,7 @@ pub struct TrayMenuItem {
 /// Where a popup hangs: which surface it belongs to, and where on it.
 ///
 /// A menu is not a window. It has no chrome, no place in the panel and no
-/// position of its own — the client decided where it goes relative to the
+/// position of its own; the client decided where it goes relative to the
 /// surface that opened it, and the browser's only job is to put it there and
 /// keep it there while that surface moves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,12 +154,12 @@ pub struct SurfaceCreated {
     /// client and black once encoded, so the browser is told what to show and
     /// clips the rest away.
     pub content: Rect,
-    /// Set when this surface is a popup — a menu, a tooltip, a combobox list —
+    /// Set when this surface is a popup (a menu, a tooltip, a combobox list)
     /// rather than a window of its own.
     pub parent: Option<Anchor>,
     /// Whether the shell should draw this window's chrome.
     ///
-    /// False for a client that decorates itself — a GTK application, whose
+    /// False for a client that decorates itself: a GTK application, whose
     /// headerbar is part of the window it drew. Such a client never asks for a
     /// decoration mode, because it does not implement the protocol that would
     /// let the compositor answer, so the shell drawing a titlebar of its own
@@ -209,7 +209,7 @@ pub enum Press {
 ///
 /// Motion and scroll name the surface they landed on, and nothing else does.
 /// That is the split Wayland already makes: the pointer goes where it is
-/// pointed, and the keyboard goes where the focus is — while buttons and wheel
+/// pointed, and the keyboard goes where the focus is, while buttons and wheel
 /// notches follow the pointer's own focus, which the surface below establishes.
 /// Without the id every one of these went to the focused window, so hovering or
 /// scrolling an unfocused one moved the pointer inside the focused one instead.
@@ -249,7 +249,7 @@ pub enum ServerMessage {
     /// The surface's title changed, or was seen for the first time.
     ///
     /// Separate from `SurfaceCreated` because a client sets its title whenever
-    /// it likes — a terminal rewrites it on every command — and the browser
+    /// it likes (a terminal rewrites it on every command) and the browser
     /// wants the new one without a new surface.
     SurfaceTitle {
         id: SurfaceId,
@@ -284,7 +284,7 @@ pub enum ServerMessage {
     /// The menu of one tray item, in answer to [`ClientMessage::TrayMenuOpen`].
     ///
     /// Fetched when it is asked for, never cached: a tray menu says what an
-    /// application is doing right now — connected networks, playing or paused —
+    /// application is doing right now (connected networks, playing or paused)
     /// and a stale one is worse than a slow one.
     TrayMenu {
         id: String,
@@ -295,7 +295,7 @@ pub enum ServerMessage {
     /// Opaque and ordered: the browser appends these to a media source in the
     /// order they arrive and nothing here looks inside them. The first chunk a
     /// connection receives is the stream's header, so the capture is started
-    /// per browser rather than shared — a browser that joined halfway through
+    /// per browser rather than shared; a browser that joined halfway through
     /// somebody else's stream would have nothing to initialise a decoder with.
     Audio {
         payload: Vec<u8>,
@@ -313,7 +313,7 @@ pub enum ServerMessage {
     /// What the pointer should look like over a client's surface.
     ///
     /// The name is a CSS cursor keyword, which is also the XDG cursor name the
-    /// client asked for — the two vocabularies are the same one, so the browser
+    /// client asked for; the two vocabularies are the same one, so the browser
     /// can hand it straight to the stylesheet. `none` hides the pointer, which
     /// is what a client that draws its own does.
     ///
@@ -362,7 +362,7 @@ pub enum ClientMessage {
     Launch { id: u32 },
     /// Click a tray icon: the item's own action, or its alternate one.
     ///
-    /// What the action does is entirely the application's business — most
+    /// What the action does is entirely the application's business; most
     /// present a window, some toggle something, some only have a menu and do
     /// nothing at all here.
     TrayActivate { id: String, secondary: bool },
@@ -391,14 +391,14 @@ pub enum ClientMessage {
     /// Same reason as `SetMaximized`: only the client can redraw at a new size,
     /// and a shell that stretched the box instead would be scaling a surface
     /// rendered for a smaller one. Sent when the gesture ends rather than
-    /// throughout it — every configure costs the client a reallocation and the
+    /// throughout it, every configure costs the client a reallocation and the
     /// wire a keyframe, so a drag would spend hundreds for one useful answer.
     SetSize { id: SurfaceId, size: Size },
     /// The size the browser wants surfaces configured at, in device pixels.
     ///
     /// Headless has no output, so without this the compositor invents a size
     /// from an environment variable and every client renders at it regardless of
-    /// the window it is actually displayed in — too small, and then upscaled by
+    /// the window it is actually displayed in; too small, and then upscaled by
     /// the browser, which is what makes it look soft. The browser is the display
     /// here, so the browser is what knows the answer.
     Resize { size: Size },
@@ -419,7 +419,7 @@ mod tests {
     };
     use webland_core::{Point, Rect, Size, SurfaceId};
 
-    // Round-trips through the real wire codec (`encode`/`decode`) — the exact
+    // Round-trips through the real wire codec (`encode`/`decode`); the exact
     // bytes both the backend and the WASM frontend put on the wire.
 
     #[test]

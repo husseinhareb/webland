@@ -66,7 +66,7 @@ impl SurfaceRenderer {
     ///
     /// Clipped to the frame's visible rectangle and no further than the canvas:
     /// an encoder rounds a surface up to whole macroblocks, and the padding it
-    /// adds is undefined pixels — green, in practice, since empty NV12 decodes
+    /// adds is undefined pixels: green, in practice, since empty NV12 decodes
     /// that way. The stream's crop is supposed to hide it and usually does, so
     /// this is the belt to that braces: nothing outside the surface's own box
     /// can reach the canvas whatever the decoder hands over.

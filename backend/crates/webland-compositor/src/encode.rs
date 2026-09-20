@@ -1,7 +1,7 @@
 //! H.264 encode on the GPU, via VA-API.
 //!
 //! Phase 2 gate 4 asks for 1080p60 inside a sane video bitrate. Deflated pixels
-//! cannot get there — a scrolling terminal costs ~47 Mbit/s that way, because
+//! cannot get there; a scrolling terminal costs ~47 Mbit/s that way, because
 //! deflate has no idea that this frame resembles the last one. H.264 does.
 //!
 //! Everything here is FFI. ffmpeg's safe Rust wrapper covers no part of the
@@ -47,7 +47,7 @@ pub enum Encoded {
     ///
     /// Not a failure: an encoder holds a frame or two before it produces output.
     /// The distinction matters because the caller must not fall back to another
-    /// codec here — the frame is already in this stream, and sending it again by
+    /// codec here; the frame is already in this stream, and sending it again by
     /// another route would both duplicate it and leave a hole in the video.
     Pending,
     /// The frame could not be encoded at all; use something else.
@@ -93,7 +93,7 @@ pub struct Encoder {
     width: u32,
     height: u32,
     /// The surface's real width, which is the stride of the pixels handed to
-    /// [`Encoder::encode`] — not the same as the width actually encoded.
+    /// [`Encoder::encode`], not the same as the width actually encoded.
     source_width: u32,
     pts: i64,
     input: Input,
@@ -134,7 +134,7 @@ impl Encoder {
     ///
     /// # Errors
     /// Returns an error if VA-API is unavailable, `h264_vaapi` is missing, or
-    /// the filter graph will not configure — all of which mean "use deflate".
+    /// the filter graph will not configure, all of which mean "use deflate".
     pub fn new(
         node: &str,
         width: u32,
@@ -150,13 +150,13 @@ impl Encoder {
         // 16 is coded at the next multiple up and carries cropping to say where
         // it really ends. Decoders are supposed to honour that; Firefox's VA-API
         // path paints the whole surface instead, and the padding it adds is
-        // never initialised — zeroed NV12, which is the bright green strip that
+        // never initialised: zeroed NV12, which is the bright green strip that
         // appeared down the right of every window whose width was not a
         // multiple of 16.
         //
         // So there is nothing to crop: encode the whole blocks that fit and
-        // announce *that* as the surface. A client picks its own size — a
-        // terminal rounds to whole character cells — so the cost is up to
+        // announce *that* as the surface. A client picks its own size, a
+        // terminal rounds to whole character cells, so the cost is up to
         // fifteen pixels of such a window's own edge padding, which is a great
         // deal less than a green bar. Clients that take the size they are
         // configured at lose nothing at all, because the browser asks for
@@ -465,8 +465,8 @@ impl Encoder {
             return Encoded::Failed;
         }
         // Rebuild the descriptor in place. Objects are distinct fds, not planes:
-        // a compressed AMD buffer arrives as two planes — pixels and the DCC
-        // metadata — that share one buffer object at different offsets, and
+        // a compressed AMD buffer arrives as two planes, pixels and the DCC
+        // metadata, that share one buffer object at different offsets, and
         // VA-API refuses to map a frame made of more than one object.
         let descriptor = &mut *self.descriptor;
         *descriptor = unsafe { std::mem::zeroed() };
@@ -605,7 +605,7 @@ impl Encoder {
     /// needs before it can decode anything at all.
     ///
     /// Returns `None` when the encoder accepted the frame but has no packet yet,
-    /// and on any encode error — a dropped frame is recoverable, and the next
+    /// and on any encode error; a dropped frame is recoverable, and the next
     /// keyframe resynchronises the browser.
     #[must_use]
     pub fn encode(&mut self, bgra: &[u8], keyframe: bool) -> Encoded {
@@ -646,7 +646,7 @@ impl Encoder {
         // SAFETY: all four pointers are live for the lifetime of `self`.
         unsafe {
             // KEEP_REF, or the call takes our buffer and leaves the frame
-            // empty — the next frame would then copy into a null plane.
+            // empty; the next frame would then copy into a null plane.
             let pushed =
                 av_buffersrc_add_frame_flags(self.src, frame, AV_BUFFERSRC_FLAG_KEEP_REF as c_int);
             if pushed < 0 {
@@ -760,7 +760,7 @@ mod tests {
     /// The picture must never be larger than what whole macroblocks cover: an
     /// encoder that rounded *up* would be coding pixels the client's buffer
     /// does not have, and one that rounded to anything but 16 would leave the
-    /// stream carrying cropping again — which is the green edge this exists to
+    /// stream carrying cropping again, which is the green edge this exists to
     /// prevent.
     #[test]
     fn a_picture_is_always_whole_macroblocks_that_fit() {

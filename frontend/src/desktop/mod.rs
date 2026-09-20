@@ -2,7 +2,7 @@
 //! transport to the scene.
 //!
 //! Windows are Leptos components over [`Scene`]'s signal, so dragging one or
-//! raising it is a signal update and a restyle — no server round trip, no
+//! raising it is a signal update and a restyle, no server round trip, no
 //! re-encode. The canvas inside each window is the only part the compositor
 //! knows about.
 //!

@@ -5,7 +5,7 @@
 //! That event is not always enough. It only fires where the browser thinks
 //! something can be pasted *into*, so copying in an application outside the
 //! browser and pressing the chord over a client's surface could reach the
-//! compositor with nothing attached — the copy simply did not cross. So the
+//! compositor with nothing attached; the copy simply did not cross. So the
 //! clipboard is also read whenever the page regains focus, which is exactly
 //! when the user has come back from copying something somewhere else. That read
 //! needs permission, asked for once by the browser; without it the `paste`
@@ -33,8 +33,8 @@ pub struct PendingPaste {
 /// Hold a paste chord's key event back until the clipboard text has been sent,
 /// so the compositor has the selection set before the client asks for it.
 ///
-/// The timeout is the safety net: a browser that fires no `paste` event at all —
-/// an empty clipboard on some of them — would otherwise swallow the keystroke.
+/// The timeout is the safety net: a browser that fires no `paste` event at all (
+/// an empty clipboard on some of them) would otherwise swallow the keystroke.
 pub fn defer(
     transport: &Rc<WebSocketTransport>,
     pending: &Rc<RefCell<Option<PendingPaste>>>,
@@ -66,7 +66,7 @@ fn flush_deferred(transport: &WebSocketTransport, pending: &RefCell<Option<Pendi
     }
 }
 
-/// Is this the chord that pastes — either spelling of it?
+/// Is this the chord that pastes, either spelling of it?
 pub fn is_paste(event: &KeyboardEvent) -> bool {
     let modified = event.ctrl_key() || event.meta_key();
     (modified && event.code() == "KeyV") || (event.shift_key() && event.code() == "Insert")
@@ -75,7 +75,7 @@ pub fn is_paste(event: &KeyboardEvent) -> bool {
 /// Send the browser's clipboard whenever the browser hands it over.
 ///
 /// A `paste` event carries the text with it, so this needs no permission and no
-/// prompt — unlike reading the clipboard directly, which needs both.
+/// prompt, unlike reading the clipboard directly, which needs both.
 ///
 /// The `keydown` handler defers the paste chord's key event into
 /// `pending_paste`. After the clipboard text is sent here, the deferred key is
@@ -107,7 +107,7 @@ pub fn wire_paste(transport: Rc<WebSocketTransport>, pending: Rc<RefCell<Option<
 /// Send the browser's clipboard whenever the page is returned to.
 ///
 /// The last text sent is remembered, so coming back to a tab a dozen times does
-/// not send the same paragraph a dozen times — and so the text this browser was
+/// not send the same paragraph a dozen times, and so the text this browser was
 /// *given* by a client is not immediately handed back to the compositor as if
 /// the user had copied it outside.
 pub fn sync_on_focus(transport: Rc<WebSocketTransport>) {
@@ -147,7 +147,7 @@ pub fn sync_on_focus(transport: Rc<WebSocketTransport>) {
 ///
 /// Fire and forget: the write is allowed while the page still holds the user
 /// activation from the copy that caused it, and there is nothing useful to do
-/// when it is not — the text is gone by then anyway.
+/// when it is not; the text is gone by then anyway.
 pub fn set_clipboard(text: &str) {
     if let Some(window) = web_sys::window() {
         let _ = window.navigator().clipboard().write_text(text);

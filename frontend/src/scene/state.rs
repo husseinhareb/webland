@@ -52,7 +52,7 @@ pub struct Scene {
     pub tray_menu: RwSignal<Option<(String, Vec<TrayMenuItem>)>>,
     /// The workspace on screen. Windows on any other one are hidden.
     pub workspace: RwSignal<u32>,
-    /// The pointer's look over a client's surface, as a CSS cursor keyword —
+    /// The pointer's look over a client's surface, as a CSS cursor keyword;
     /// the shell's own chrome keeps the cursors its stylesheet gives it.
     pub cursor: RwSignal<String>,
     /// A gesture a client made on its own titlebar, waiting for the window it
@@ -60,7 +60,7 @@ pub struct Scene {
     /// window that takes it clears this.
     pub requests: RwSignal<Option<(u64, WindowRequest)>>,
     /// The window following the pointer because its client asked to be moved.
-    /// The shell's own titlebar drag does not use this — it has the pointer
+    /// The shell's own titlebar drag does not use this; it has the pointer
     /// events already, and this is for the case where the client has them.
     pub dragging: RwSignal<Option<u64>>,
     /// Whether the browser currently has pointer lock active (VM capture mode).
@@ -282,7 +282,7 @@ impl Scene {
         let id = frame.id;
         if frame.codec == Codec::H264 {
             // Decoding is asynchronous and finishes on the GPU later, so the
-            // ack comes from the decoder's own callback — except when the chunk
+            // ack comes from the decoder's own callback; except when the chunk
             // was never queued, which produces no callback and would leave the
             // surface waiting forever.
             let queued = view
@@ -321,7 +321,7 @@ impl Scene {
         }
         // Size the bitmap here rather than from the view. Assigning `width` or
         // `height` clears a canvas even when the value does not change, and a
-        // reactive attribute would do exactly that on the next render — wiping
+        // reactive attribute would do exactly that on the next render, wiping
         // the frame just drawn, with no new frame coming for an idle client.
         if let Some((width, height)) = self
             .windows
@@ -368,7 +368,7 @@ impl Scene {
         if self.windows.with(|ws| ws.iter().any(|w| w.id == id)) {
             // A resize, not a new window: the canvas follows the
             // surface, and this is the only moment its bitmap should be
-            // reallocated — which also clears it, hence the keyframe
+            // reallocated, which also clears it, hence the keyframe
             // that always accompanies a resize.
             self.windows.update(|ws| {
                 if let Some(window) = ws.iter_mut().find(|w| w.id == id) {

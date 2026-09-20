@@ -1,7 +1,7 @@
 //! Where a window and its canvas are drawn, computed from the scene's signal.
 //!
 //! Read through the signal rather than a prop. `<For>` is keyed by id, so a
-//! window whose title or position changes is not rebuilt — a prop is a snapshot
+//! window whose title or position changes is not rebuilt; a prop is a snapshot
 //! from the moment the row first appeared, and a static style attribute would
 //! leave dragging visibly doing nothing.
 
@@ -82,7 +82,7 @@ pub fn surface(scene: StoredValue<Scene, LocalStorage>, id: u64) -> String {
     })
 }
 
-/// The canvas itself, which is the whole streamed image — bigger than the window
+/// The canvas itself, which is the whole streamed image, bigger than the window
 /// for a client that drew a shadow around itself, and offset so the window's
 /// corner lands in the corner.
 ///
@@ -96,7 +96,7 @@ pub fn canvas(scene: StoredValue<Scene, LocalStorage>, id: u64, cursor: &str) ->
         let sy = f64::from(w.height) / f64::from(w.content.height.max(1));
         let (image_w, image_h) = w.image;
         // The cursor rides on the canvas rather than the desktop, so it is the
-        // client's over a client's pixels and the shell's everywhere else — the
+        // client's over a client's pixels and the shell's everywhere else; the
         // titlebar's grab hand, the resize handles' arrows.
         format!(
             "cursor:{cursor}; width:{}px; height:{}px; left:{}px; top:{}px;",

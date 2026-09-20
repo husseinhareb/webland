@@ -2,9 +2,9 @@
 //! reconstructs.
 //!
 //! Phase 2 is not done until its numbers are met (see `docs/roadmap.md`), so
-//! this connects exactly as the browser does — asks for a keyframe, applies each
+//! this connects exactly as the browser does, asks for a keyframe, applies each
 //! damage rectangle to its own copy of the surface, acks every frame so the
-//! compositor's frame clock keeps turning — and reports the rate. At the end it
+//! compositor's frame clock keeps turning, and reports the rate. At the end it
 //! asks for one more keyframe and compares: with an idle client its copy must be
 //! byte-identical, or the browser's would be quietly wrong too.
 //!
@@ -53,8 +53,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
     let (mut frames, mut bytes, mut pixels) = (0u64, 0u64, 0u64);
     let mut surfaces: HashMap<SurfaceId, Surface> = HashMap::new();
-    // Frames that cannot be applied — damage outside the surface, or a payload
-    // that does not fill it — corrupt the browser's texture silently.
+    // Frames that cannot be applied (damage outside the surface, or a payload
+    // that does not fill it) corrupt the browser's texture silently.
     let mut unapplicable = 0u64;
     // Set once the closing keyframe has been compared against our own copy.
     let mut verdict = String::from("no keyframe to check against");
@@ -125,7 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[allow(clippy::cast_precision_loss)]
     let (frames_f, bytes_f, pixels_f) = (frames as f64, bytes as f64, pixels as f64);
     println!(
-        "{frames} frames in {elapsed:.1}s — {:.1} frames/s, {:.1} KiB/s, {:.0} px/frame damage",
+        "{frames} frames in {elapsed:.1}s: {:.1} frames/s, {:.1} KiB/s, {:.0} px/frame damage",
         frames_f / elapsed,
         bytes_f / 1024.0 / elapsed,
         if frames == 0 {

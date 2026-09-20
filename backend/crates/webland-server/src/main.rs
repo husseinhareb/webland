@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The session's own bus, started before anything that speaks to it. The
     // applications the compositor launches register their tray icons here, and
-    // the tray watches this same bus for exactly those registrations — the
+    // the tray watches this same bus for exactly those registrations; the
     // host's bus belongs to the host's desktop, where the watcher name is taken
     // and where our applications are not.
     let bus = webland_compositor::spawn::Bus::start();

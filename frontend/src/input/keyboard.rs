@@ -63,7 +63,7 @@ pub fn install(scene: &Scene, transport: &Rc<WebSocketTransport>, latency: &Rc<L
                 // Keys aimed at the shell stay in the shell. The listener is on
                 // the window so that applications get keys without the canvas
                 // needing focus, which also means the launcher's search box
-                // would otherwise type into whichever client has the seat — and
+                // would otherwise type into whichever client has the seat, and
                 // be counted as interaction latency while doing it.
                 if aimed_at_shell(&event) {
                     return;
@@ -105,7 +105,7 @@ pub fn install(scene: &Scene, transport: &Rc<WebSocketTransport>, latency: &Rc<L
                     return;
                 };
                 // This key belongs to the application now, so the browser must
-                // not also act on it — arrows and space scroll the page, tab
+                // not also act on it; arrows and space scroll the page, tab
                 // walks the shell's own buttons, and `/` opens a find bar.
                 //
                 // Paste is the exception: the browser must be allowed to run
@@ -153,8 +153,8 @@ pub fn install(scene: &Scene, transport: &Rc<WebSocketTransport>, latency: &Rc<L
         // A page that loses focus stops being told about keys, so whatever was
         // held when it went away is never released: alt-tab out of a chord and
         // the compositor holds those modifiers for good. From then on every
-        // keystroke reaches the client as a chord — letters do nothing and
-        // return splits the terminal — and no later key event disagrees with
+        // keystroke reaches the client as a chord, letters do nothing and
+        // return splits the terminal, and no later key event disagrees with
         // `held`, so the reconciliation above never notices. Let go on the way
         // out, which is the one moment the browser still tells us about.
         {
@@ -196,7 +196,7 @@ fn hold(held: &Rc<RefCell<Vec<u32>>>, keycode: u32, press: Press) {
 /// Tell the compositor that nothing is held down.
 ///
 /// The seat outlives any one page: a modifier still down when a tab is closed or
-/// reloaded stays down, and the new page has no way to find out — it knows only
+/// reloaded stays down, and the new page has no way to find out; it knows only
 /// what it sent itself, which is nothing yet. So a page that has just connected
 /// says what is true of a keyboard that has just been plugged in. Releasing a
 /// key that was not held costs nothing; the compositor ignores it.

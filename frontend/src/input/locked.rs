@@ -2,7 +2,7 @@
 //!
 //! With the lock taken the browser routes nothing: there is no target on the
 //! event and no hover, so the shell tracks a virtual cursor and hit-tests
-//! everything — its own chrome included — against `elementFromPoint`, then
+//! everything, its own chrome included, against `elementFromPoint`, then
 //! dispatches synthetic pointer events at whatever it finds.
 //!
 //! The exception is a client holding a pointer constraint (a game grabbing the

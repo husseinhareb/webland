@@ -6,8 +6,8 @@
 //! the server would be the wrong picture whenever those are two machines.
 //!
 //! So the file never leaves the browser. It is read with `FileReader`, kept as
-//! a data URL in `localStorage` — `local`, not `session`, because a wallpaper
-//! is a decision made once — and applied as a CSS background.
+//! a data URL in `localStorage`, `local`, not `session`, because a wallpaper
+//! is a decision made once, and applied as a CSS background.
 //!
 //! ponytail: a data URL in `localStorage`, which most browsers cap somewhere
 //! around 5 MB. A photograph straight off a camera will not fit, and the user
@@ -62,7 +62,7 @@ pub fn chosen(input: &HtmlInputElement, scene: StoredValue<Scene, LocalStorage>)
             if !stored {
                 scene.show_toast(
                     String::from("Wallpaper set for now"),
-                    Some(String::from("too large to remember — it will go on reload")),
+                    Some(String::from("too large to remember; it will go on reload")),
                 );
             }
         });

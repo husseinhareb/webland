@@ -54,7 +54,7 @@ pub fn connect(
     // surface to patch into.
     let opened = transport.clone();
     transport.on_open(Box::new(move || {
-        status.set(String::from("connected — waiting for a surface…"));
+        status.set(String::from("connected, waiting for a surface…"));
         // Say how big the display is before asking for anything to put on it,
         // so the first frame arrives at the right size rather than at a guess.
         if let Some(size) = window_size()
@@ -88,13 +88,13 @@ pub fn connect(
         listener.forget();
     }
     transport.on_close(Box::new(move || {
-        status.set(String::from("disconnected — is the backend running?"));
+        status.set(String::from("disconnected; is the backend running?"));
     }));
 
     // Acks are sent when the scene says a frame is on screen, not when one
     // comes off the wire. H.264 decoding finishes on the GPU well after the
     // packet arrives, and acking on arrival told the compositor to send more
-    // while the decoder was still behind — the browser is supposed to drive the
+    // while the decoder was still behind; the browser is supposed to drive the
     // frame clock (Decision 3), and it cannot do that by acking work it has not
     // done.
     {

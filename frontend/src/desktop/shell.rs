@@ -29,7 +29,7 @@ const WINDOW_FRACTION: f64 = 0.62;
 /// sharp.
 ///
 /// A fraction of the browser window rather than all of it, because these are
-/// windows on a desktop now — at full size every one would cover the shell and
+/// windows on a desktop now: at full size every one would cover the shell and
 /// each other, and there would be nothing to drag.
 pub fn window_size() -> Option<Size> {
     let window = web_sys::window()?;
@@ -126,7 +126,7 @@ pub fn Desktop() -> impl IntoView {
                 captured.get().then(|| {
                     view! {
                         <div class="capture-banner">
-                            <span class="capture-text">"Cursor Locked — Press ESC to release"</span>
+                            <span class="capture-text">"Cursor Locked: press ESC to release"</span>
                             <button class="capture-release-btn"
                                     on:pointerdown=move |_| capture::release(scene)>"Release"</button>
                         </div>
@@ -153,7 +153,7 @@ pub fn Desktop() -> impl IntoView {
                 })
             }}
             // Iterate ids, not states. `<For>` rebuilds a row whenever its item
-            // value changes, and rebuilding a row means a brand new <canvas> —
+            // value changes, and rebuilding a row means a brand new <canvas>,
             // leaving the renderer drawing into the detached one it captured,
             // which succeeds and shows nothing. An id never changes, so the row
             // is built once and everything inside it updates reactively.
@@ -168,8 +168,8 @@ pub fn Desktop() -> impl IntoView {
 }
 
 /// Where the virtual cursor is drawn, and whether it is drawn at all: not while
-/// the real pointer is loose, and not while a client holds it for its own camera
-/// — that client draws its own crosshair.
+/// the real pointer is loose, and not while a client holds it for its own
+/// camera, since that client draws its own crosshair.
 fn cursor_style(
     scene: StoredValue<Scene, LocalStorage>,
     captured: bool,

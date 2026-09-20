@@ -6,7 +6,7 @@ use webland_core::Size;
 /// Round a float to a pixel count.
 ///
 /// The clamp is the point. `as` alone is saturating, so it cannot produce a
-/// wrapped value — but it turns a negative into 0 and a NaN into 0 without
+/// wrapped value, but it turns a negative into 0 and a NaN into 0 without
 /// saying so, and a zero-sized window is not a thing a caller ever wants. One
 /// pixel is: it is visibly wrong instead of invisibly wrong.
 #[must_use]
@@ -21,7 +21,7 @@ pub fn pixels(value: f64) -> u32 {
 /// Round a float to a screen coordinate.
 ///
 /// Same reasoning as [`pixels`], except that a coordinate is allowed to be
-/// negative — a window dragged off the left edge has a negative `x` — so only
+/// negative (a window dragged off the left edge has a negative `x`) so only
 /// the range is clamped.
 #[must_use]
 #[allow(clippy::cast_possible_truncation)] // clamped above
@@ -93,7 +93,7 @@ pub const MACROBLOCK: u32 = 16;
 ///
 /// A picture that is not a multiple of 16 is coded at the next multiple up and
 /// cropped back, and a decoder that paints the padding instead of honouring the
-/// crop draws it as a bright green strip — which is what Firefox's hardware
+/// crop draws it as a bright green strip, which is what Firefox's hardware
 /// decoder does. The compositor keeps the same rule on its side, so a client
 /// that takes the size it is given produces no padding at all and loses
 /// nothing; one that insists on its own size (a terminal, which rounds to
@@ -110,7 +110,7 @@ pub const fn whole_blocks(value: u32) -> u32 {
 }
 
 /// A window's corner during a drag: the pointer, less the grab offset, never
-/// above the top of the screen — a titlebar dragged off it cannot be grabbed
+/// above the top of the screen; a titlebar dragged off it cannot be grabbed
 /// again.
 #[must_use]
 pub fn drag_origin((cx, cy): (f64, f64), (dx, dy): (f64, f64)) -> (i32, i32) {

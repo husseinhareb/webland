@@ -1,7 +1,7 @@
 //! The system tray: a freedesktop `StatusNotifier` host on the session's bus.
 //!
 //! Tray icons are not windows and never were. An application does not draw
-//! one — it publishes an `org.kde.StatusNotifierItem` on the session bus and
+//! one, it publishes an `org.kde.StatusNotifierItem` on the session bus and
 //! waits for a panel to come and ask about it. Nothing appears at all until
 //! something registers itself as the *watcher* that items look for, and as a
 //! *host* that says somebody is willing to show them. This module is both, and
@@ -103,7 +103,7 @@ impl Watcher {
     /// An item announcing itself.
     ///
     /// `service` is either a bus name or, from applications that follow the
-    /// other half of the specification, just an object path — in which case
+    /// other half of the specification, just an object path, in which case
     /// the sender of the message is the bus name. Both spellings end up as one
     /// address here so the rest of the module has one thing to handle.
     async fn register_status_notifier_item(
@@ -163,7 +163,7 @@ impl Tray {
     /// `bus` is the bus the compositor points applications at. Watching any
     /// other one is watching the wrong place: tray icons are registered by
     /// those applications, on that bus, while the host's belongs to the host's
-    /// own desktop — which already has a panel holding the watcher name.
+    /// own desktop, which already has a panel holding the watcher name.
     ///
     /// `None` when the session has no bus of its own, which is not fatal: it
     /// only means no tray.
@@ -367,7 +367,7 @@ async fn forget_departed(
 }
 
 /// Re-ask about everything whenever any item says something about itself
-/// changed — a new icon, a new title, a new status.
+/// changed, a new icon, a new title, a new status.
 async fn follow_item_changes(
     connection: Connection,
     changed: tokio::sync::mpsc::UnboundedSender<()>,
@@ -393,7 +393,7 @@ async fn follow_item_changes(
 /// An item's icon, as a `data:` URL the browser can put in an `<img>`.
 ///
 /// The item's own pixmap first, because it is what the application drew and is
-/// current — a network applet's icon says whether it is connected. The icon
+/// current; a network applet's icon says whether it is connected. The icon
 /// name is the fallback, resolved against the icon theme like any other.
 async fn icon_for(item: &StatusNotifierItemProxy<'_>) -> Option<String> {
     if let Ok(pixmaps) = item.icon_pixmap().await
@@ -438,8 +438,8 @@ fn best_pixmap(pixmaps: &[(i32, i32, Vec<u8>)]) -> Option<(i32, i32, Vec<u8>)> {
 
 /// Encode an SNI pixmap as a PNG.
 ///
-/// SNI pixmaps are 32-bit ARGB in network byte order — the bytes are `A R G B`
-/// per pixel — with straight alpha. PNG wants `R G B A`, which is the same four
+/// SNI pixmaps are 32-bit ARGB in network byte order: the bytes are `A R G B`
+/// per pixel, with straight alpha. PNG wants `R G B A`, which is the same four
 /// values rotated by one, and no other conversion: the alpha is already
 /// straight, so nothing has to be un-premultiplied.
 fn png(width: i32, height: i32, argb: &[u8]) -> Option<Vec<u8>> {
@@ -467,7 +467,7 @@ fn png(width: i32, height: i32, argb: &[u8]) -> Option<Vec<u8>> {
 /// Turn one dbusmenu node into a row, or drop it.
 ///
 /// Dropped: rows the application marked invisible, and rows with no label that
-/// are not separators — a menu is read, and a blank row cannot be.
+/// are not separators; a menu is read, and a blank row cannot be.
 #[allow(clippy::needless_pass_by_value)] // `try_into` consumes it.
 fn menu_item(value: OwnedValue) -> Option<TrayMenuItem> {
     let (id, properties, children): MenuLayout = value.try_into().ok()?;
@@ -592,7 +592,7 @@ mod tests {
     /// as a real application does, and must come back out of `snapshot` with
     /// the picture it published.
     ///
-    /// Skipped when `dbus-daemon` is not installed — this is the one test here
+    /// Skipped when `dbus-daemon` is not installed; this is the one test here
     /// that needs a machine, and a missing bus is not a failing tray.
     #[tokio::test]
     async fn an_item_that_registers_is_seen_with_its_icon() {
@@ -668,7 +668,7 @@ mod tests {
     }
 
     /// A private `dbus-daemon`, so the test never touches the machine's own
-    /// session bus — registering a watcher there would take tray icons away
+    /// session bus; registering a watcher there would take tray icons away
     /// from whatever panel the user is actually running.
     struct Bus {
         address: String,

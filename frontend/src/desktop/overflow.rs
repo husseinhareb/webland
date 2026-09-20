@@ -2,7 +2,7 @@
 //! session's own controls behind it.
 //!
 //! These are the settings that belong to the browser showing the desktop rather
-//! than to any window in it — cursor lock, fullscreen, the wallpaper — and a
+//! than to any window in it (cursor lock, fullscreen, the wallpaper), and a
 //! desktop keeps those out of the bar itself, one click away, the way Windows
 //! has since the chevron appeared beside its clock.
 

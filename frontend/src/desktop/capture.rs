@@ -1,6 +1,6 @@
 //! Pointer lock and fullscreen.
 //!
-//! The browser owns both, and only tells the page after the fact — a lock can be
+//! The browser owns both, and only tells the page after the fact; a lock can be
 //! refused, and either can be dropped with Escape without asking. So the scene's
 //! `captured` and `fullscreen` signals are set from the browser's own events, not
 //! from the call that asked, and everything here goes one way.

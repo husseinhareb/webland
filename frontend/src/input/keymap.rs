@@ -87,7 +87,7 @@ pub fn evdev_key(code: &str) -> Option<u32> {
         "ScrollLock" => 70,
         // The numeric keypad. Distinct scancodes from the digit row, and a
         // client reading them through xkb gets the arrows and Home/End that
-        // NumLock-off produces — which is why mapping them to the digits above
+        // NumLock-off produces, which is why mapping them to the digits above
         // would be wrong rather than merely approximate.
         "Numpad7" => 71,
         "Numpad8" => 72,
@@ -126,7 +126,7 @@ pub fn evdev_key(code: &str) -> Option<u32> {
         "IntlYen" => 124,
         // The super key. Every desktop shortcut a client defines starts with
         // it, and without a scancode the browser's key event was dropped before
-        // it reached the compositor — while `MODIFIERS` below already claimed
+        // it reached the compositor, while `MODIFIERS` below already claimed
         // to hold it down, so the two could not agree about it either.
         "MetaLeft" => 125,
         "MetaRight" => 126,
@@ -137,14 +137,14 @@ pub fn evdev_key(code: &str) -> Option<u32> {
 }
 
 /// Modifier name as the browser reports it, and the evdev keycodes that produce
-/// it. Left and right count as the same modifier, because they are — except for
+/// it. Left and right count as the same modifier, because they are; except for
 /// alt, where they are not.
 ///
-/// On any layout with a third level — azerty, qwertz, the international qwertys
-/// — the right-hand alt key is `AltGr`, which is `ISO_Level3_Shift` and not alt
+/// On any layout with a third level, azerty, qwertz, the international qwertys
+///, the right-hand alt key is `AltGr`, which is `ISO_Level3_Shift` and not alt
 /// at all. The browser says so: it reports `AltGraph`, and leaves `Alt` false.
 /// Counted as alt, the reconciliation below saw a modifier the browser denied
-/// holding and dutifully released it — before every single keystroke it was
+/// holding and dutifully released it; before every single keystroke it was
 /// meant to shift. The user pressed `AltGr` and `à` for `@` and got `à`.
 pub const MODIFIERS: [(&str, &[u32]); 5] = [
     ("Shift", &[42, 54]),

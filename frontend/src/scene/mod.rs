@@ -1,7 +1,7 @@
 //! The browser-side scene: one window per Wayland surface.
 //!
 //! Phase 4 proved the streaming is per-surface; this is where that becomes a
-//! desktop. Each surface has its own canvas, renderer and decoder — a separate
+//! desktop. Each surface has its own canvas, renderer and decoder; a separate
 //! decoder is not a nicety, since each surface is an independent H.264 stream
 //! with its own keyframes, and feeding two of them to one decoder produces
 //! garbage from the first frame.

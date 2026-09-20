@@ -30,14 +30,14 @@ pub struct WindowState {
     /// window size and runs ahead of it for the length of a resize drag.
     pub width: u32,
     pub height: u32,
-    /// The streamed image's size, which is the canvas bitmap's size — bigger
+    /// The streamed image's size, which is the canvas bitmap's size, bigger
     /// than the window whenever the client drew a shadow around it.
     pub image: (u32, u32),
     /// Where the window sits inside that image. Everything outside it is the
     /// client's own margin, which is black once encoded and so is clipped away.
     pub content: Rect,
     pub title: String,
-    /// What the client calls itself — `firefox`, `org.gnome.Nautilus` — which
+    /// What the client calls itself (`firefox`, `org.gnome.Nautilus`) which
     /// is how the panel finds the application's icon. `None` until the client
     /// says, and for a client that never does.
     pub app_id: Option<String>,
@@ -51,7 +51,7 @@ pub struct WindowState {
     /// stacking: switching workspaces shows and hides windows and tells the
     /// compositor nothing.
     pub workspace: u32,
-    /// Set when this is a popup — a menu or a tooltip — which is not a window:
+    /// Set when this is a popup (a menu or a tooltip) which is not a window:
     /// it has no chrome, no task button and no position of its own, and hangs
     /// off the surface that opened it until that surface goes or it is
     /// dismissed.
@@ -59,7 +59,7 @@ pub struct WindowState {
     /// Whether the shell draws this window's chrome. False for a client that
     /// drew its own titlebar, where a second one would sit directly above it.
     pub decorated: bool,
-    /// Where the window sat before it was maximized — so `Some` is what it
+    /// Where the window sat before it was maximized, so `Some` is what it
     /// means to be maximized, and there is no way to be maximized with nowhere
     /// to go back to.
     pub restore: Option<(i32, i32)>,

@@ -1,7 +1,7 @@
 //! Click-to-photon, which is the number Phase 3 is judged on.
 //!
-//! Both ends of the measurement happen in this process — the input is dispatched
-//! here and the frame it causes is drawn here — so `performance.now()` is
+//! Both ends of the measurement happen in this process, the input is dispatched
+//! here and the frame it causes is drawn here, so `performance.now()` is
 //! already the shared clock the roadmap asks for, and nothing has to be
 //! synchronised with the compositor.
 //!
@@ -9,7 +9,7 @@
 //! first frame drawn after an input is the frame that input caused. That breaks
 //! down under a continuously animating client, where some frame would have
 //! arrived anyway and the number comes out flattering. It is honest for the
-//! thing Phase 3 cares about — typing, clicking, dragging — and dishonest for
+//! thing Phase 3 cares about (typing, clicking, dragging) and dishonest for
 //! video, so read it as interaction latency and not as a frame time.
 
 use std::cell::{Cell, RefCell};

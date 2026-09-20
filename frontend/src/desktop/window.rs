@@ -77,7 +77,7 @@ pub fn Window(
     // only learns who has the seat.
     //
     // Alt held makes it a move instead, which is the only way to shift a window
-    // that has no titlebar here and whose client does not offer one either — a
+    // that has no titlebar here and whose client does not offer one either; a
     // client that decorates itself is assumed to, but nothing makes it.
     let focus = move |event: PointerEvent| {
         scene.with_value(|scene| scene.raise(SurfaceId(id)));
@@ -109,7 +109,7 @@ pub fn Window(
         // `bare` drops the shell's titlebar for a window that drew its own.
         //
         // ponytail: it is dropped for anything that never asked to be decorated,
-        // which xdg-decoration says to read as "the client decorates itself" —
+        // which xdg-decoration says to read as "the client decorates itself";
         // true of GTK, and of nothing that draws no chrome at all. Such a window
         // keeps its resize handles and moves on alt-drag, but loses the shell's
         // close button; give the panel's task button a close if one turns up.

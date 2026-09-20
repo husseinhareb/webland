@@ -1,7 +1,7 @@
 //! What the desktop is costing on the wire, at the end of the panel.
 //!
 //! Every window is a video stream, so bandwidth is the number that decides
-//! whether Webland is usable over a given link — and the only way to find out
+//! whether Webland is usable over a given link, and the only way to find out
 //! today is a terminal on the other machine. A rate in the panel makes the cost
 //! of a habit (a full-screen video, four windows animating at once) visible
 //! while it is being formed.

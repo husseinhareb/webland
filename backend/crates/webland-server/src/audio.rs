@@ -2,7 +2,7 @@
 //!
 //! Webland's applications play into a null sink of the session's own
 //! ([`webland_compositor::spawn::AUDIO_SINK`]), never into the machine's
-//! speakers — the desktop is being watched somewhere else, possibly on another
+//! speakers; the desktop is being watched somewhere else, possibly on another
 //! machine, and that is where its sound belongs. This module creates that sink
 //! and streams its monitor to each connected browser.
 //!
@@ -14,7 +14,7 @@
 //! while nobody is watching.
 //!
 //! ponytail: `WebM` through `MediaSource` buffers, so this is a media path
-//! (a video, a music player) and not a low-latency one — expect a few hundred
+//! (a video, a music player) and not a low-latency one, expect a few hundred
 //! milliseconds. Raw Opus packets into `WebCodecs`' `AudioDecoder` is the
 //! upgrade if a click ever has to be heard the instant it is made.
 
@@ -44,13 +44,13 @@ impl Sink {
     /// Returns `None` when there is no `PulseAudio` (or `PipeWire`'s pulse server)
     /// to create it in, which is not fatal: the desktop runs, and applications
     /// fall back to whatever `PULSE_SINK` means to a machine that has no such
-    /// sink — nothing, so they play on the host's own output as they did
+    /// sink: nothing, so they play on the host's own output as they did
     /// before.
     #[must_use]
     pub fn create() -> Option<Self> {
         // Whatever a previous run left behind. [`Drop`] takes the sink away
         // when the server exits cleanly, and a server is almost never asked to
-        // exit cleanly — Ctrl-C and `SIGTERM` do not unwind — so without this
+        // exit cleanly (Ctrl-C and `SIGTERM` do not unwind) so without this
         // the machine's mixer collects one dead "Webland" output per run.
         //
         // Safe to do unconditionally: the sink is named after this session, and
@@ -93,7 +93,7 @@ const OWNER: &str = "device.webland.pid";
 /// sessions at once is unusual, but taking the audio out from under one of them
 /// would be a strange way to start.
 ///
-/// ponytail: the private bus leaks the same way — a `dbus-daemon` whose parent
+/// ponytail: the private bus leaks the same way; a `dbus-daemon` whose parent
 /// was killed keeps running until logout. It is idle and invisible, where a
 /// stray sink shows up in the machine's mixer; give it the same treatment if
 /// the strays ever become a nuisance.

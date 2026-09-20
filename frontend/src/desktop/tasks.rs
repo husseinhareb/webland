@@ -60,7 +60,7 @@ pub fn Tasks(
     view! {
         <div class="tasks">
             // Only this workspace's windows. A task list showing every window on
-            // every workspace is the thing workspaces exist to stop — and a menu
+            // every workspace is the thing workspaces exist to stop, and a menu
             // is not a window, so popups stay out of it whichever workspace they
             // are on.
             <For
@@ -92,7 +92,7 @@ pub fn Tasks(
 /// launcher also knows about.
 ///
 /// The match is on the `.desktop` file's basename, which is what `app_id` is
-/// supposed to be — and often is not exactly: a client may report `Navigator`
+/// supposed to be, and often is not exactly: a client may report `Navigator`
 /// or trail a `.desktop`, so the comparison is case-insensitive and settles for
 /// one name ending in the other rather than demanding they be equal.
 fn icon(scene: StoredValue<Scene, LocalStorage>, app_id: Option<String>) -> impl IntoView {

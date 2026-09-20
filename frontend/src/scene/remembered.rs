@@ -1,7 +1,7 @@
 //! Where the windows were, so a reload does not scatter them.
 //!
-//! The scene is browser-side state — position, workspace, whether a window is
-//! minimized — and the compositor neither knows nor can be asked. Reloading the
+//! The scene is browser-side state, position, workspace, whether a window is
+//! minimized, and the compositor neither knows nor can be asked. Reloading the
 //! page therefore threw all of it away and re-cascaded every surface from the
 //! top left, which is the one thing that made the desktop feel like a web page.
 //!
@@ -53,7 +53,7 @@ fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.session_storage().ok().flatten()
 }
 
-/// `id,x,y,workspace,minimized;…` — small enough not to want a JSON parser.
+/// `id,x,y,workspace,minimized;…`; small enough not to want a JSON parser.
 fn format(windows: &[WindowState]) -> String {
     windows
         .iter()

@@ -1,5 +1,5 @@
 //! Moving a window that the shell has no titlebar to grab: a client-driven move
-//! — a GTK titlebar drag — or an alt-drag anywhere in the surface.
+//! (a GTK titlebar drag) or an alt-drag anywhere in the surface.
 //!
 //! It runs on the desktop element rather than in the window, because the pointer
 //! is over the client's own surface: no piece of shell chrome saw the gesture
@@ -7,7 +7,7 @@
 //!
 //! What it does *not* do is move the window itself. A second implementation of
 //! dragging is how these windows ended up being the only ones that could not be
-//! snapped to an edge or dropped on a workspace — so once the grab is known,
+//! snapped to an edge or dropped on a workspace, so once the grab is known,
 //! this hands the gesture to the titlebar drag and every window moves the same
 //! way.
 

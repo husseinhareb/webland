@@ -2,7 +2,7 @@
 //! that moves it.
 //!
 //! A window that drew its own titlebar gets the `bare` class instead, and none of
-//! this; its buttons reach the shell as `WindowRequest`s — see [`super::window`].
+//! this; its buttons reach the shell as `WindowRequest`s. See [`super::window`].
 
 use std::rc::Rc;
 

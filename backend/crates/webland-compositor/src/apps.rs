@@ -1,7 +1,7 @@
 //! What the launcher can start.
 //!
 //! Read from freedesktop `.desktop` files, which is where every installed
-//! application already describes itself — name, command, and whether it wants to
+//! application already describes itself: name, command, and whether it wants to
 //! be shown in a menu at all. Nothing here is configured by hand, except the one
 //! thing that cannot be read from anywhere: see [`parse_overrides`].
 
@@ -27,7 +27,7 @@ impl Applications {
     /// Scan the usual directories.
     #[must_use]
     pub fn scan() -> Self {
-        // Name, `Exec=` line, `Icon=` name, and the file's own basename — which
+        // Name, `Exec=` line, `Icon=` name, and the file's own basename, which
         // is the other name an entry goes by, and the one a person writing a
         // launch override is most likely to have typed.
         let mut found: Vec<(String, String, Option<String>, String)> = Vec::new();
@@ -81,7 +81,7 @@ impl Applications {
     /// Re-scan when an application has been installed or removed.
     ///
     /// Listing the directories is two `readdir` calls against names the kernel
-    /// already has cached, which is cheap enough to do every pass — unlike the
+    /// already has cached, which is cheap enough to do every pass, unlike the
     /// scan itself, which opens every file and base64s every icon. Returns
     /// whether the listing changed, and so wants announcing to the browser.
     ///
@@ -112,7 +112,7 @@ impl Applications {
     ///
     /// The id must have come from [`Applications::listing`]; an unknown one is
     /// ignored rather than guessed at. What the child is told about the session
-    /// it joins — the Wayland socket, the X display, the bus — is
+    /// it joins (the Wayland socket, the X display, the bus) is
     /// [`crate::spawn::Env`]'s business, not this module's.
     pub fn launch(&self, id: u32, env: &crate::spawn::Env) {
         let Some(argv) = self.commands.get(&id) else {
@@ -205,7 +205,7 @@ fn override_for<'a>(
 /// Parse `Name = command` lines, keyed by lower-cased name.
 ///
 /// This exists for one thing a `.desktop` file cannot express: a single-instance
-/// application — Firefox, Chromium, anything Electron — hands its request to a
+/// application (Firefox, Chromium, anything Electron) hands its request to a
 /// copy already running as the same user and exits, so the launcher's window
 /// never appears at all. The second instance needs a profile of its own, and
 /// only the person running webland knows where that should live:
@@ -215,7 +215,7 @@ fn override_for<'a>(
 /// Chromium = chromium --user-data-dir=~/.webland/chromium
 /// ```
 ///
-/// Create the profile directory first — Firefox will not make one whose parent
+/// Create the profile directory first; Firefox will not make one whose parent
 /// is missing, and says so in a dialog rather than on stderr.
 ///
 /// The name written here need not be the entry's whole `Name=`: see
@@ -251,7 +251,7 @@ fn expand_home(word: &str, home: &str) -> String {
 /// Pull the name and command out of one `.desktop` file.
 ///
 /// Returns `None` for anything that should not appear in a menu: entries that
-/// are not applications, ones marked `NoDisplay`, and ones needing a terminal —
+/// are not applications, ones marked `NoDisplay`, and ones needing a terminal,
 /// which would want a terminal emulator wrapped around them, and there is no
 /// sensible one to pick from here.
 fn read_entry(path: &Path) -> Option<(String, String, Option<String>)> {
@@ -288,7 +288,7 @@ fn read_entry(path: &Path) -> Option<(String, String, Option<String>)> {
 /// `Icon=` is either an absolute path or a name to look up under the icon
 /// theme directories.
 ///
-/// ponytail: `hicolor` and `pixmaps` only — no `index.theme` parsing, so an
+/// ponytail: `hicolor` and `pixmaps` only: no `index.theme` parsing, so an
 /// icon that exists solely in the user's chosen theme is missed. hicolor is the
 /// spec's fallback and where applications install themselves, which covers
 /// nearly all of them; read the theme when one turns up missing.
@@ -309,8 +309,8 @@ fn icon_path(name: &str) -> Option<PathBuf> {
     ];
     for root in &roots {
         let hicolor = PathBuf::from(format!("{root}/hicolor"));
-        // Read the sizes rather than guess them — applications install at
-        // whatever size they please, 512 as readily as 48 — and take the
+        // Read the sizes rather than guess them, applications install at
+        // whatever size they please, 512 as readily as 48, and take the
         // smallest that is still crisp: the panel draws these about 20px, where
         // a 48px png costs a few KB and the scalable svg can cost a hundred.
         let mut sizes: Vec<u32> = std::fs::read_dir(&hicolor)
@@ -402,8 +402,8 @@ const FIELD_CODES: [&str; 13] = [
 /// One `Exec=` line or launch override, as the argv to spawn.
 ///
 /// Splitting on whitespace is not enough and never was. A `.desktop` file quotes
-/// any argument with a space in it — `--profile "~/My Profiles"`, `env
-/// FOO="bar baz" app` — so whitespace splitting cuts those in half and hands the
+/// any argument with a space in it, `--profile "~/My Profiles"`, `env
+/// FOO="bar baz" app`, so whitespace splitting cuts those in half and hands the
 /// quote characters themselves to the program. It also hides field codes: a
 /// quoted `"%f"` is four characters, so the old length-2 test never saw it, and
 /// inkscape and half of KDE launched with a filename of `%f`.

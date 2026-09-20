@@ -2,7 +2,7 @@
 //!
 //! Moves `webland-protocol` frames over `web_sys::WebSocket` as binary messages.
 //! Callers turn typed messages into frames with `webland_protocol::{encode,
-//! decode}` — the same codec the backend runs.
+//! decode}`; the same codec the backend runs.
 //!
 //! Frames are opaque bytes here; WebTransport would be a second type with the
 //! same four methods, and nothing below assumes a socket beyond that.

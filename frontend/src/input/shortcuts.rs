@@ -1,6 +1,6 @@
 //! Keys the shell keeps for itself: Alt+Tab, Alt+1..4, Alt+F4 and Alt+Shift+W.
 //!
-//! These never reach a client. Everything else does — see [`super::keyboard`].
+//! These never reach a client. Everything else does. See [`super::keyboard`].
 
 use leptos::prelude::*;
 use web_sys::KeyboardEvent;

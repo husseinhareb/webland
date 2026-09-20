@@ -76,8 +76,8 @@ pub fn clicked_element(up: &Element, down: &Element) -> Option<web_sys::HtmlElem
 /// Text typed into a form control belongs to the chrome around the surfaces, not
 /// to the surfaces themselves. A button is not one of those: it takes no text,
 /// and the browser leaves it focused after a click, so counting it here meant
-/// that clicking the panel's task button to raise a window — or any of the
-/// titlebar's — silently swallowed every keystroke afterwards. Return and space
+/// that clicking the panel's task button to raise a window, or any of the
+/// titlebar's, silently swallowed every keystroke afterwards. Return and space
 /// would still have activated it, which `prevent_default` now stops; nothing
 /// here reaches a button by keyboard anyway, since tab is prevented too.
 pub fn aimed_at_shell(event: &KeyboardEvent) -> bool {

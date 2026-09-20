@@ -79,7 +79,7 @@ pub fn Panel(
                         class="workspace"
                         class:here=move || current.get() == n
                         data-workspace=n.to_string()
-                        title="Workspace — drop a window here to send it"
+                        title="Workspace: drop a window here to send it"
                         on:pointerdown=move |_| switch_workspace(n)
                     >
                         {(n + 1).to_string()}

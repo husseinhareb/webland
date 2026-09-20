@@ -34,7 +34,7 @@ impl Decoder {
     /// Build a decoder that hands each decoded frame to `on_frame`.
     ///
     /// # Errors
-    /// Returns the JS error if the browser has no `VideoDecoder` — which is the
+    /// Returns the JS error if the browser has no `VideoDecoder`, which is the
     /// signal to stay on the pixel codecs.
     pub fn new(mut on_frame: impl FnMut(&VideoFrame) + 'static) -> Result<Self, JsValue> {
         let configured = Rc::new(Cell::new(false));
@@ -53,7 +53,7 @@ impl Decoder {
             web_sys::console::error_2(&JsValue::from_str("video decode failed"), &value);
             // The decoder is now closed and cannot be configured again, so this
             // only records that there is nothing to decode with: `decode` builds
-            // a replacement. Asking for a keyframe is the other half — a new
+            // a replacement. Asking for a keyframe is the other half; a new
             // decoder has no reference frames, and the compositor sends none
             // unless asked.
             failed.set(false);
@@ -84,7 +84,7 @@ impl Decoder {
     /// Replace a decoder that has closed.
     ///
     /// A `VideoDecoder` that reports an error goes to `closed`, and everything
-    /// on it throws from then on — including `configure`, so a decoder cannot
+    /// on it throws from then on, including `configure`, so a decoder cannot
     /// recover itself. Nothing noticed, which is why a surface that hit one bad
     /// frame stayed black until the page was reloaded. The closures are the
     /// ones this decoder already owns, so the replacement reports to the same

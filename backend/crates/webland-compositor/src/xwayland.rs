@@ -7,7 +7,7 @@
 //!
 //! What is X-shaped is the window management. An X client places, sizes and
 //! stacks its own windows by asking the window manager, so the compositor has to
-//! run one — [`X11Wm`] — and answer. Webland's answers are short, because the
+//! run one ([`X11Wm`]) and answer. Webland's answers are short, because the
 //! browser does the layout: a window gets the size the browser is showing, a
 //! configure request is granted, and stacking is not the compositor's business.
 
@@ -28,8 +28,8 @@ use crate::Webland;
 
 /// Start the X server and attach a window manager to it.
 ///
-/// Spawning is asynchronous — the server has to come up and claim a display
-/// number before anything can be told about it — so the socket is inserted into
+/// Spawning is asynchronous, the server has to come up and claim a display
+/// number before anything can be told about it, so the socket is inserted into
 /// the event loop and the manager starts when it reports ready. A failure is a
 /// warning rather than an error: a desktop without X clients is a working
 /// desktop, and refusing to start at all over one would be worse.
@@ -98,7 +98,7 @@ impl Webland {
     ///
     /// X has no notion of a compositor that will place the window later, so it
     /// must be given coordinates now. They are the origin, because where the
-    /// window actually sits is browser-side state the compositor never learns —
+    /// window actually sits is browser-side state the compositor never learns;
     /// the same reason `xdg_toplevel` windows are configured at a size and told
     /// nothing about position.
     fn x11_rect(&self) -> Rectangle<i32, Logical> {
@@ -158,7 +158,7 @@ impl XWaylandShellHandler for Webland {
 
 impl XwmHandler for Webland {
     /// Only ever reached from the window manager's own event source, so there is
-    /// an `X11Wm` by construction — provided nothing else takes it away.
+    /// an `X11Wm` by construction; provided nothing else takes it away.
     ///
     /// Which is why `xwm` is set once and never cleared. An X server that dies
     /// leaves events already queued behind it, and each of them comes back
@@ -175,7 +175,7 @@ impl XwmHandler for Webland {
 
     /// An X client is asking for its window to appear.
     ///
-    /// Granted, at the size the browser is showing — an X client picks its own
+    /// Granted, at the size the browser is showing; an X client picks its own
     /// size and would otherwise open at whatever it last remembered, which on a
     /// desktop whose size the browser owns is a guess.
     fn map_window_request(&mut self, _xwm: XwmId, window: X11Surface) {
@@ -194,7 +194,7 @@ impl XwmHandler for Webland {
     /// manager is told about rather than asked.
     ///
     /// Shown like any other, at the size and place the client chose. The browser
-    /// gets it as a surface of its own — unanchored, because X gives a position
+    /// gets it as a surface of its own; unanchored, because X gives a position
     /// on the screen rather than a parent to hang from.
     fn mapped_override_redirect_window(&mut self, _xwm: XwmId, window: X11Surface) {
         self.adopt_x11(&window);
@@ -277,10 +277,10 @@ impl XwmHandler for Webland {
 ///
 /// Both loops have to turn here. The X server is a Wayland client of this
 /// compositor as well as a calloop source, and it does not report ready until it
-/// has finished talking to the display — so pumping only the event loop waits
+/// has finished talking to the display, so pumping only the event loop waits
 /// for a message the X server is waiting on the compositor to let it send.
 /// Only called when [`start`] reported an X server on its way, and it gives up
-/// the moment one reports that it died — so a machine with no `xwayland` at all
+/// the moment one reports that it died, so a machine with no `xwayland` at all
 /// waits for nothing.
 pub(crate) fn wait_ready(
     event_loop: &mut EventLoop<'static, Webland>,
@@ -310,7 +310,7 @@ const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 impl Webland {
     /// Tell the X windows which of them the browser just raised.
     ///
-    /// Keyboard focus itself is not set here — `XWayland` follows the Wayland
+    /// Keyboard focus itself is not set here, `XWayland` follows the Wayland
     /// seat for that. This is the `_NET_WM_STATE_FOCUSED` hint, which is what an
     /// X client reads to know whether to draw itself active or dimmed, and it
     /// has no way to work that out from the Wayland side.
