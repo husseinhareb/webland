@@ -106,7 +106,7 @@ pub fn Desktop() -> impl IntoView {
         }
     });
 
-    let drag = drag::ClientDrag::new(scene);
+    let drag = drag::ClientDrag::new(scene, transport);
 
     view! {
         <main node_ref=desktop_ref id="webland-desktop"
