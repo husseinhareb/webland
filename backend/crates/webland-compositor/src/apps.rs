@@ -107,14 +107,13 @@ impl Applications {
         self.names.clone()
     }
 
-    /// Start one, on the given Wayland display.
+    /// Start one, in this session.
     ///
     /// The id must have come from [`Applications::listing`]; an unknown one is
-    /// ignored rather than guessed at.
-    /// `xdisplay` is the X server's number, when one is running: an X client
-    /// reads `DISPLAY` and nothing else, and never learns there is a Wayland
-    /// socket beside it.
-    pub fn launch(&self, id: u32, display: &std::ffi::OsStr, xdisplay: Option<u32>) {
+    /// ignored rather than guessed at. What the child is told about the session
+    /// it joins — the Wayland socket, the X display, the bus — is
+    /// [`crate::spawn::Env`]'s business, not this module's.
+    pub fn launch(&self, id: u32, env: &crate::spawn::Env) {
         let Some(argv) = self.commands.get(&id) else {
             tracing::warn!(id, "launch request for an unknown application");
             return;
@@ -127,11 +126,8 @@ impl Applications {
         // a child inherits the compositor's working directory, so every file
         // dialog in every application would open in the source tree.
         let home = home();
-        let mut launcher = std::process::Command::new(program);
-        launcher.args(arguments).env("WAYLAND_DISPLAY", display);
-        if let Some(number) = xdisplay {
-            launcher.env("DISPLAY", format!(":{number}"));
-        }
+        let mut launcher = env.command(std::ffi::OsStr::new(program));
+        launcher.args(arguments);
         if !home.is_empty() {
             launcher.current_dir(&home);
         }

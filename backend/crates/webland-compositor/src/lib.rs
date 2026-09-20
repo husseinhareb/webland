@@ -46,6 +46,7 @@ use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::gbm::GbmDevice;
 pub mod apps;
 pub mod encode;
+pub mod spawn;
 mod xwayland;
 
 use smithay::backend::allocator::{Buffer, Fourcc, Modifier};
@@ -1512,7 +1513,7 @@ struct Session<'a> {
     pointer: &'a PointerHandle<Webland>,
     start_time: std::time::Instant,
     applications: &'a apps::Applications,
-    display: &'a std::ffi::OsStr,
+    env: &'a spawn::Env,
 }
 
 fn drain_client(
@@ -1526,7 +1527,7 @@ fn drain_client(
         pointer,
         start_time,
         applications,
-        display,
+        env,
     } = session;
     let start_time = *start_time;
     let Some(poll) = poll_client.as_mut() else {
@@ -1593,7 +1594,7 @@ fn drain_client(
     }
 
     for id in launching {
-        applications.launch(id, display, state.xdisplay);
+        applications.launch(id, env);
     }
 
     for id in closing {
@@ -2240,13 +2241,12 @@ pub fn run_winit(
         xwayland::wait_ready(&mut event_loop, &mut display, &mut state);
     }
 
+    // Everything launched from here on joins this session: our socket, our X
+    // display, and a session bus that is ours rather than the host's.
+    let env = spawn::Env::new(&socket_name, state.xdisplay);
+
     if let Some(cmd) = std::env::var_os("WEBLAND_SPAWN") {
-        let mut spawn = std::process::Command::new(&cmd);
-        spawn.env("WAYLAND_DISPLAY", &socket_name);
-        if let Some(display_number) = state.xdisplay {
-            spawn.env("DISPLAY", format!(":{display_number}"));
-        }
-        match spawn.spawn() {
+        match env.command(&cmd).spawn() {
             Ok(_) => tracing::info!(command = ?cmd, "spawned client"),
             Err(err) => tracing::warn!(command = ?cmd, %err, "failed to spawn client"),
         }
@@ -2307,7 +2307,7 @@ pub fn run_winit(
                 pointer: &pointer,
                 start_time,
                 applications: &applications,
-                display: &socket_name,
+                env: &env,
             },
         );
 
@@ -2498,13 +2498,12 @@ pub fn run_headless(
         xwayland::wait_ready(&mut event_loop, &mut display, &mut state);
     }
 
+    // Everything launched from here on joins this session: our socket, our X
+    // display, and a session bus that is ours rather than the host's.
+    let env = spawn::Env::new(&socket_name, state.xdisplay);
+
     if let Some(cmd) = std::env::var_os("WEBLAND_SPAWN") {
-        let mut spawn = std::process::Command::new(&cmd);
-        spawn.env("WAYLAND_DISPLAY", &socket_name);
-        if let Some(display_number) = state.xdisplay {
-            spawn.env("DISPLAY", format!(":{display_number}"));
-        }
-        match spawn.spawn() {
+        match env.command(&cmd).spawn() {
             Ok(_) => tracing::info!(command = ?cmd, "spawned client"),
             Err(err) => tracing::warn!(command = ?cmd, %err, "failed to spawn client"),
         }
@@ -2550,7 +2549,7 @@ pub fn run_headless(
                 pointer: &pointer,
                 start_time,
                 applications: &applications,
-                display: &socket_name,
+                env: &env,
             },
         );
         stream_dirty(

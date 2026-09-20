@@ -20,8 +20,8 @@ by the browser, and a shell with window chrome, a panel, a launcher, four
 workspaces, Alt+Tab, edge snapping and a shared clipboard. X11 applications work
 through XWayland, which the compositor starts and manages itself.
 
-Not there yet: application notifications (no D-Bus daemon), a settings UI, and
-authentication. The protocol has no auth at all, so bind it to localhost and put
+Not there yet: application notifications, a system tray, audio, a settings UI,
+and authentication. The protocol has no auth at all, so bind it to localhost and put
 a proxy in front if you want it elsewhere. [docs/roadmap.md](docs/roadmap.md)
 has the order of work, [docs/architecture.md](docs/architecture.md) the shape of
 the code.
@@ -48,14 +48,14 @@ sudo pacman -S rust-wasm trunk wasm-bindgen
 rustup target add wasm32-unknown-unknown && cargo install trunk
 ```
 
-`.run.sh` drives both halves:
+`run.sh` drives both halves:
 
 ```sh
-./.run.sh            # dev: backend + trunk serve, debug build
-./.run.sh release    # build both in release, then run them
-./.run.sh build      # release build only
-./.run.sh run        # run release artifacts without rebuilding
-./.run.sh check      # fmt, clippy and tests for both halves, plus a wasm build
+./run.sh            # dev: backend + trunk serve, debug build
+./run.sh release    # build both in release, then run them
+./run.sh build      # release build only
+./run.sh run        # run release artifacts without rebuilding
+./run.sh check      # fmt, clippy and tests for both halves, plus a wasm build
 ```
 
 Then open http://127.0.0.1:3030. The page serves the protocol socket from its
@@ -67,7 +67,7 @@ client at it, or have it spawn one:
 
 ```sh
 # spawn a client with the desktop
-WEBLAND_SPAWN=kitty ./.run.sh
+WEBLAND_SPAWN=kitty ./run.sh
 
 # or connect one yourself to the socket it prints
 cargo run --manifest-path backend/Cargo.toml -p webland-server   # logs display="wayland-2"
@@ -88,7 +88,7 @@ comes up on the render node at all.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `WEBLAND_HEADLESS` | `1` from `.run.sh` | Unset it to also open a winit window on your existing desktop, useful as visual ground truth |
+| `WEBLAND_HEADLESS` | `1` from `run.sh` | Unset it to also open a winit window on your existing desktop, useful as visual ground truth |
 | `WEBLAND_SPAWN` | none | Client to start with the compositor |
 | `WEBLAND_SIZE` | `1280x800` | Size clients are configured at |
 | `WEBLAND_PORT` | `3030` | Port the page is served on |
@@ -154,15 +154,28 @@ own chrome itself.
 
 ## The launcher
 
-It lists what it finds in `.desktop` files, with their icons. An application
-that will not start from a generic `Exec` line, such as anything that hands off
-to a copy already running as the same user, can be given a different command in
+It lists what it finds in `.desktop` files, with their icons.
+
+Webland starts a D-Bus session bus of its own and every application it launches
+joins that one rather than the host desktop's. This is what keeps the two
+sessions apart: without it a single-instance application — Thunar, Obsidian,
+anything Electron — finds the copy already running outside and hands it the
+window, so a launch here opened something over there. The keyring and polkit
+prompters likewise start on our bus, and so appear in Webland rather than on the
+host desktop.
+
+What the bus cannot separate is state kept in a directory. Two Firefoxes cannot
+share one profile however they are launched, so a second instance needs a
+profile of its own, which only you can decide the location of. Give it one in
 `~/.config/webland/launch.conf`:
 
 ```
-Firefox  = firefox --new-instance
+Firefox  = firefox --no-remote --profile ~/.webland/firefox
 Chromium = chromium --user-data-dir=~/.webland/chromium
 ```
+
+Create the directory first — Firefox will not make one whose parent is missing,
+and says so in a dialog rather than on stderr.
 
 The name on the left need not be the entry's whole `Name=`. Any part of it will
 do, as will the `.desktop` file's own name, so `Firefox` finds the entry that
