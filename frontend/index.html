@@ -5,7 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Webland</title>
     <link data-trunk rel="css" href="src/style.css" />
-    <link data-trunk rel="rust" data-wasm-opt="z" />
+    <!-- No subresource integrity on the wasm bundle, because trunk 0.21 gets it
+         wrong: it emits the `modulepreload` links for wasm-bindgen snippets in
+         reverse order while keeping the hashes in file order, so inline0.js is
+         served inline1.js's digest and the browser blocks both. Two snippets
+         are enough to trigger it (`input/keyboard.rs`, `dbg.rs`). Everything
+         here is same-origin off our own server, which is the case SRI does
+         least for; put it back when the ordering bug is fixed upstream. -->
+    <link data-trunk rel="rust" data-wasm-opt="z" data-integrity="none" />
   </head>
   <body></body>
 </html>

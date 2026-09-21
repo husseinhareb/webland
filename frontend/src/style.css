@@ -811,6 +811,10 @@ body.pointer-locked * {
   cursor: none !important;
 }
 
+/* The shell's own pointer, drawn while a client holds the real one. Its picture
+   is the host's cursor theme, set inline from `Cursors` (see desktop/shell.rs);
+   the size and the hotspot offset come with it, so there is nothing per shape to
+   write here. */
 .virtual-cursor {
   position: fixed;
   top: 0;
@@ -819,53 +823,16 @@ body.pointer-locked * {
   z-index: 2147483647;
   width: 24px;
   height: 24px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%231f232d'/%3E%3Cstop offset='100%25' stop-color='%230d0f14'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M1 1 L1 17.5 L5.5 13.5 L9 21.5 L12 20.2 L8.6 12.5 L15 12.5 Z' fill='url(%23g)' stroke='%23ffffff' stroke-width='1.5' stroke-linejoin='round' stroke-linecap='round'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
-  background-size: 24px 24px;
-  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.45)) drop-shadow(0 1px 2px rgba(0, 0, 0, 0.35));
   will-change: transform;
 }
 
-.virtual-cursor.ns-resize {
-  margin-left: -12px;
-  margin-top: -12px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M12 2 L7 7 L10 7 L10 17 L7 17 L12 22 L17 17 L14 17 L14 7 L17 7 Z' fill='%231f232d' stroke='%23ffffff' stroke-width='1.5' stroke-linejoin='round'/%3E%3C/svg%3E");
-}
-
-.virtual-cursor.ew-resize {
-  margin-left: -12px;
-  margin-top: -12px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M2 12 L7 7 L7 10 L17 10 L17 7 L22 12 L17 17 L17 14 L7 14 L7 17 Z' fill='%231f232d' stroke='%23ffffff' stroke-width='1.5' stroke-linejoin='round'/%3E%3C/svg%3E");
-}
-
-.virtual-cursor.nwse-resize {
-  margin-left: -12px;
-  margin-top: -12px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M4 4 L10 4 L7.8 6.2 L17.8 16.2 L20 14 L20 20 L14 20 L16.2 17.8 L6.2 7.8 L4 10 Z' fill='%231f232d' stroke='%23ffffff' stroke-width='1.5' stroke-linejoin='round'/%3E%3C/svg%3E");
-}
-
-.virtual-cursor.nesw-resize {
-  margin-left: -12px;
-  margin-top: -12px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M20 4 L14 4 L16.2 6.2 L6.2 16.2 L4 14 L4 20 L10 20 L7.8 17.8 L17.8 7.8 L20 10 Z' fill='%231f232d' stroke='%23ffffff' stroke-width='1.5' stroke-linejoin='round'/%3E%3C/svg%3E");
-}
-
-.virtual-cursor.pointer {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M9 2 L9 13 L6.5 11 L4.5 13 L8.5 17 L13 21.5 L19 21.5 L20 14 L17 10 L13 10 L13 4 C13 2.9 12.1 2 11 2 C9.9 2 9 2.9 9 2 Z' fill='%231f232d' stroke='%23ffffff' stroke-width='1.5' stroke-linejoin='round'/%3E%3C/svg%3E");
-}
-
-.virtual-cursor.grab {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M7 11 L7 5 C7 4 8 3 9 3 C10 3 11 4 11 5 L11 10 L11 4 C11 3 12 2 13 2 C14 2 15 3 15 4 L15 10 L15 5 C15 4 16 3 17 3 C18 3 19 4 19 5 L19 13 C19 18 15 22 10 22 C6 22 4 19 4 16 L4 12 C4 11 5 10 6 10 C7 10 7 11 7 11 Z' fill='%231f232d' stroke='%23ffffff' stroke-width='1.5' stroke-linejoin='round'/%3E%3C/svg%3E");
-}
-
-.virtual-cursor.grabbing {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M6 13 L6 10 C6 9 7 8 8 8 C9 8 10 9 10 10 L10 9 C10 8 11 7 12 7 C13 7 14 8 14 9 L14 8 C14 7 15 6 16 6 C17 6 18 7 18 8 L18 14 C18 18 15 21 11 21 C7 21 5 18 5 15 Z' fill='%231f232d' stroke='%23ffffff' stroke-width='1.5' stroke-linejoin='round'/%3E%3C/svg%3E");
-}
-
-.virtual-cursor.text {
-  margin-left: -12px;
-  margin-top: -12px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M8 4 L16 4 M12 4 L12 20 M8 20 L16 20' stroke='%23ffffff' stroke-width='2.5' stroke-linecap='round'/%3E%3Cpath d='M8 4 L16 4 M12 4 L12 20 M8 20 L16 20' stroke='%231f232d' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+/* Only for a host with no cursor theme to read: one drawn arrow, rather than an
+   invisible pointer. */
+.virtual-cursor.fallback {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%231f232d'/%3E%3Cstop offset='100%25' stop-color='%230d0f14'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M1 1 L1 17.5 L5.5 13.5 L9 21.5 L12 20.2 L8.6 12.5 L15 12.5 Z' fill='url(%23g)' stroke='%23ffffff' stroke-width='1.5' stroke-linejoin='round' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-size: 24px 24px;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.45)) drop-shadow(0 1px 2px rgba(0, 0, 0, 0.35));
 }
 
 /* Aero Snap ghost preview overlay */
