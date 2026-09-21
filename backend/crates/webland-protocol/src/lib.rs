@@ -330,6 +330,39 @@ pub enum ServerMessage {
     SurfaceDestroyed {
         id: SurfaceId,
     },
+    /// The pointer shapes the shell draws itself, as the host's cursor theme
+    /// draws them.
+    ///
+    /// Sent once, when a browser asks for a keyframe. The browser renders the
+    /// real pointer from the CSS keyword in [`ServerMessage::Cursor`], and only
+    /// needs pictures while a client holds the pointer and the shell is drawing
+    /// a cursor of its own.
+    ///
+    /// Last on purpose. `bincode` numbers variants by position, so a variant
+    /// added anywhere but the end renumbers every one after it, and a browser
+    /// running last week's build then reads a `SurfaceDestroyed` as something
+    /// else entirely: no windows, a black page, and nothing in the console to
+    /// say why. Appended, an old browser simply fails to decode this one
+    /// message and keeps its own cursors. New messages go here.
+    Cursors {
+        shapes: Vec<CursorShape>,
+    },
+}
+
+/// One pointer shape, read from the host's cursor theme.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CursorShape {
+    /// The CSS cursor keyword this draws, which is also its XDG cursor name.
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    /// The pixel the pointer actually points at.
+    pub hotspot_x: u32,
+    pub hotspot_y: u32,
+    /// Straight (not premultiplied) RGBA, tightly packed, top row first: what
+    /// `ImageData` takes. Cursor files store premultiplied alpha, so this is
+    /// divided back out before it goes on the wire.
+    pub rgba: Vec<u8>,
 }
 
 /// Browser → backend. Input plus the frame-pacing ack.
