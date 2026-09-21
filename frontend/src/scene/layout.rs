@@ -176,6 +176,16 @@ impl Scene {
         })
     }
 
+    /// Whether this surface is one the scene already holds a window for.
+    ///
+    /// Tells a surface being announced for the first time from one being
+    /// re-announced after a resize, which the wire cannot: both arrive as
+    /// `SurfaceCreated`.
+    #[must_use]
+    pub fn knows(&self, id: SurfaceId) -> bool {
+        self.windows.with_untracked(|ws| ws.iter().any(|w| w.id == id.0))
+    }
+
     /// Whether a surface is currently visible on screen (not minimized and on the active workspace).
     /// Follows child popups/anchors up to their root parent window.
     #[must_use]

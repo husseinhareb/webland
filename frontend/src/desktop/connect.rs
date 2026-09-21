@@ -155,8 +155,16 @@ pub fn connect(
             }
             return;
         }
+        // A *new* window takes the seat, and only a new one: `SurfaceCreated` is
+        // re-sent for a surface that merely resized, and asking for the focus
+        // again on one of those is read by the compositor as a click outside
+        // whatever menu is open, which took the menu down. Firefox resizes its
+        // window as it opens a context menu, so its own menu died the moment it
+        // appeared. Read before `scene.handle`, while the scene still holds what
+        // it knew before this message.
         if let ServerMessage::SurfaceCreated(ref created) = message
             && created.parent.is_none()
+            && !scene.knows(created.id)
             && let Ok(frame) = encode(&ClientMessage::Focus { id: created.id })
         {
             ack.send(&frame);
