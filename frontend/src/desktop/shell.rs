@@ -10,7 +10,7 @@ use webland_core::{Size, SurfaceId};
 use webland_protocol::{ClientMessage, encode};
 
 use crate::latency::Latency;
-use crate::scene::{Scene, SnapZone, pixel_ratio, pixels, whole_blocks};
+use crate::scene::{CursorArt, Scene, SnapZone, pixel_ratio, pixels, whole_blocks};
 
 use super::chrome::{AltTabModal, ToastContainer};
 use super::connect::connect;
@@ -134,7 +134,7 @@ pub fn Desktop() -> impl IntoView {
                 })
             }}
             <div
-                class=move || format!("virtual-cursor {}", cursor_icon.get())
+                class=move || cursor_class(scene, &cursor_icon.get())
                 style=move || cursor_style(scene, captured.get(), virtual_cursor.get())
             />
             <p class="status" style=move || if captured.get() { "display: none;" } else { "" }>
@@ -180,6 +180,9 @@ fn cursor_style(
             .windows
             .with(|ws| ws.iter().any(|w| w.pointer_locked && !w.minimized))
     });
+    crate::dbg::log(format!(
+        "DBG cursor_style captured={captured} grabbed={grabbed} at={at:?}"
+    ));
     if !captured || grabbed {
         return String::from("display: none;");
     }
@@ -187,5 +190,42 @@ fn cursor_style(
         let (w, h) = crate::input::viewport();
         (w / 2.0, h / 2.0)
     });
-    format!("transform: translate3d({cx:.1}px, {cy:.1}px, 0); display: block;")
+    let art = cursor_art(scene).map_or_else(String::new, |art| {
+        // Hung by its hotspot, which is the pixel the theme says the pointer
+        // actually points at: an arrow's tip, a text bar's middle.
+        format!(
+            "background-image:url({}); background-size:{}px {}px; width:{}px; height:{}px;              margin-left:-{}px; margin-top:-{}px;",
+            art.url,
+            art.width,
+            art.height,
+            art.width,
+            art.height,
+            art.hotspot_x,
+            art.hotspot_y,
+        )
+    });
+    format!("transform: translate3d({cx:.1}px, {cy:.1}px, 0); display: block; {art}")
+}
+
+/// The theme's picture for the shape being drawn, or its `default` where the
+/// theme has no such shape.
+fn cursor_art(scene: StoredValue<Scene, LocalStorage>) -> Option<CursorArt> {
+    scene.with_value(|scene| {
+        let shape = scene.cursor_icon.get();
+        scene.cursors.with(|cursors| {
+            cursors
+                .get(&shape)
+                .or_else(|| cursors.get("default"))
+                .cloned()
+        })
+    })
+}
+
+/// A host with no cursor theme leaves the stylesheet to draw the pointer, which
+/// it only does for `fallback`: the theme's own picture is the one to use
+/// wherever there is one.
+fn cursor_class(scene: StoredValue<Scene, LocalStorage>, shape: &str) -> String {
+    let themed = cursor_art(scene).is_some();
+    let fallback = if themed { "" } else { " fallback" };
+    format!("virtual-cursor {shape}{fallback}")
 }
