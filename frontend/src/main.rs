@@ -6,6 +6,7 @@
 
 mod audio;
 mod compositor;
+mod dbg;
 mod decode;
 mod desktop;
 mod input;
