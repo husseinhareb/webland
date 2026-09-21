@@ -14,6 +14,8 @@ webland-core.workspace = true
 webland-protocol.workspace = true
 tracing = "0.1.44"
 ffmpeg-next = "9.0.0"
+# Already in the tree through smithay: reads the host's cursor theme off disk.
+xcursor = "0.3.11"
 
 [lints]
 workspace = true
