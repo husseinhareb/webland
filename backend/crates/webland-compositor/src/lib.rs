@@ -45,6 +45,7 @@ use webland_protocol::{
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::gbm::GbmDevice;
 pub mod apps;
+mod cursors;
 pub mod encode;
 pub mod spawn;
 mod xwayland;
@@ -69,8 +70,12 @@ use smithay::backend::renderer::{
 };
 use smithay::backend::winit::{self, WinitEvent};
 use smithay::input::keyboard::{FilterResult, KeyboardHandle, XkbConfig};
+use smithay::desktop::{
+    PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab, find_popup_root_surface,
+};
 use smithay::input::pointer::{
-    AxisFrame, ButtonEvent, CursorImageStatus, MotionEvent, PointerHandle, RelativeMotionEvent,
+    AxisFrame, ButtonEvent, CursorImageStatus, Focus, MotionEvent, PointerHandle,
+    RelativeMotionEvent,
 };
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
@@ -177,6 +182,10 @@ pub struct Webland {
     /// Open popups (menus, tooltips, combobox lists) oldest first, so a
     /// submenu always follows the menu it came from.
     popups: Vec<PopupSurface>,
+    /// The same popups as smithay tracks them, which is what a grab is taken
+    /// against. Kept alongside the list above rather than instead of it: that
+    /// list is what gets streamed and anchored, this is what owns the seat.
+    popup_manager: PopupManager,
     /// Needed to hand the seat a selection the browser owns.
     dh: DisplayHandle,
     /// The browser's clipboard, which is what clients are given when they paste.
@@ -190,6 +199,10 @@ pub struct Webland {
     cursor: String,
     /// Tell the browser about the cursor on the next pass.
     announce_cursor: bool,
+    /// Send the host's cursor theme on the next pass. Once per browser: the
+    /// pictures are the same all session, and only a browser that has just
+    /// arrived is without them.
+    announce_cursors: bool,
 }
 
 impl BufferHandler for Webland {
@@ -219,6 +232,9 @@ impl CompositorHandler for Webland {
         // state, converted to buffer coordinates, which is where
         // `damage_since` reads it, so nothing else needs doing here.
         on_commit_buffer_handler::<Self>(surface);
+        // A popup counts as mapped on its first commit, and a grab taken
+        // against one that is not mapped yet is refused.
+        self.popup_manager.commit(surface);
     }
 }
 
@@ -274,13 +290,54 @@ impl XdgShellHandler for Webland {
         if surface.send_configure().is_err() {
             return;
         }
+        if let Err(err) = self.popup_manager.track_popup(PopupKind::Xdg(surface.clone())) {
+            tracing::warn!(%err, "could not track a popup");
+        }
         self.popups.push(surface);
     }
 
-    /// A popup asking for the pointer means a menu: it stays up until something
-    /// outside it is clicked. That click arrives as a focus change from the
-    /// browser, so there is nothing to grab here. See [`dismiss_popups`].
-    fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
+    /// A popup asking for the pointer means a menu, and the grab is the whole
+    /// difference between a menu and a picture of one.
+    ///
+    /// Granting it is what puts the seat on the popup. A client that asks for a
+    /// grab and is given nothing reads the first button press as a press
+    /// somewhere else and rolls the menu up instead of activating what was
+    /// clicked: which is exactly what Firefox did here, the press landing on the
+    /// menu, the menu closing, and the item never running.
+    ///
+    /// The browser still says what is focused and [`dismiss_popups`] still
+    /// closes menus when it names something else. This is the client's half of
+    /// the same story, and the two stay consistent because a popup that goes
+    /// away ends the grab.
+    fn grab(&mut self, surface: PopupSurface, seat: wl_seat::WlSeat, serial: Serial) {
+        let Some(seat) = Seat::<Self>::from_resource(&seat) else {
+            return;
+        };
+        let popup = PopupKind::Xdg(surface);
+        let Ok(root) = find_popup_root_surface(&popup) else {
+            return;
+        };
+        let grab = match self.popup_manager.grab_popup(root, popup, &seat, serial) {
+            Ok(grab) => grab,
+            Err(err) => {
+                tracing::debug!(%err, "a popup was refused its grab");
+                return;
+            }
+        };
+        // Never over a grab already in progress: the button that opened the menu
+        // is still down, and smithay holds the pointer for it until it comes
+        // back up. Taking the pointer here would drop that release.
+        if let Some(pointer) = seat.get_pointer()
+            && !pointer.is_grabbed()
+        {
+            pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Clear);
+        }
+        if let Some(keyboard) = seat.get_keyboard()
+            && !keyboard.is_grabbed()
+        {
+            keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
+        }
+    }
 
     /// The gestures a self-decorating client makes on its own titlebar.
     ///
@@ -651,6 +708,33 @@ fn x11_for_id(
         .iter()
         .find(|window| window.wl_surface().map(|s| s.id()) == Some(object.clone()))
         .cloned()
+}
+
+/// True when a surface is a menu: an `xdg_popup`, or the X11 equivalent, an
+/// override-redirect window the client places and takes down itself.
+///
+/// A menu must never hold the seat, whichever kind it is. The browser asks for
+/// the focus wherever the user clicks, menus included, and handing it over is
+/// what closed them:
+///
+/// - a Wayland client's toplevel gets `wl_keyboard.leave` the moment its own
+///   menu is clicked, reads that as its window being deactivated, and rolls the
+///   menu up before the release that would have run the item;
+/// - an X11 client fares no better, since Xwayland moves the X input focus with
+///   the seat and the `FocusOut` that follows means the same thing to a menu.
+///
+/// Nothing is lost by refusing: a menu belongs to the window that opened it and
+/// that window is already focused. Clicking one still raises it in the browser,
+/// and clicking anything else still closes it through [`dismiss_popups`].
+fn is_menu(state: &Webland, surface: &ObjectId) -> bool {
+    state
+        .popups
+        .iter()
+        .any(|popup| popup.wl_surface().id() == *surface)
+        || state.x11.iter().any(|window| {
+            window.is_override_redirect()
+                && window.wl_surface().map(|s| s.id()).as_ref() == Some(surface)
+        })
 }
 
 /// Inject one browser-originated input event into the seat, targeting `surface`.
@@ -1574,6 +1658,7 @@ fn drain_client(
                 // And what the pointer looks like: the browser's own default is
                 // an arrow, whatever the client last asked for.
                 state.announce_cursor = true;
+                state.announce_cursors = true;
             }
             ClientMessage::Clipboard { text } => {
                 // Handled here, in the drain, rather than with the input below:
@@ -1595,8 +1680,12 @@ fn drain_client(
                 );
             }
             ClientMessage::Focus { id } => {
-                state.focus = Some(id);
-                focus_changed = true;
+                // Clicking a menu raises it in the browser and leaves the seat
+                // where it was: see [`is_menu`].
+                if !object_for(known, id).is_some_and(|object| is_menu(state, &object)) {
+                    state.focus = Some(id);
+                    focus_changed = true;
+                }
             }
             ClientMessage::Resize { size } => resize = Some(size),
             ClientMessage::CloseSurface { id } => closing.push(id),
@@ -1712,7 +1801,7 @@ fn drain_client(
     let target = surfaces
         .iter()
         .find(|surface| Some(surface.id()) == focused)
-        .or_else(|| surfaces.first())
+        .or_else(|| surfaces.iter().find(|s| !is_menu(state, &s.id())))
         .cloned();
     if state.focus.is_none()
         && let Some(surface) = &target
@@ -1827,6 +1916,14 @@ fn stream_dirty(
         state.clipboard.clone_from(&text);
         emit(ServerMessage::Clipboard { text });
     }
+    if std::mem::take(&mut state.announce_cursors) {
+        let shapes = cursors::theme();
+        if !shapes.is_empty() {
+            emit(ServerMessage::Cursors {
+                shapes: shapes.to_vec(),
+            });
+        }
+    }
     if std::mem::take(&mut state.announce_cursor) {
         emit(ServerMessage::Cursor {
             name: state.cursor.clone(),
@@ -1847,6 +1944,7 @@ fn stream_dirty(
     // Popups are surfaces like any other: they are captured, encoded and sent
     // down the same path a window is. What makes one a popup is where the
     // browser puts it, which is the anchor announced with it.
+    state.popup_manager.cleanup();
     state.popups.retain(PopupSurface::alive);
     let focused = state.focus.and_then(|id| object_for(known, id));
     let toplevels = streamed_surfaces(state);
@@ -1874,7 +1972,7 @@ fn stream_dirty(
                 locked: false,
             }
         });
-        if is_new && anchor.is_none() {
+        if is_new && anchor.is_none() && !is_menu(state, &surface.id()) {
             state.focus = Some(tracked.id);
             state.activate_x11(Some(&surface.id()));
         }
@@ -1962,7 +2060,13 @@ fn stream_dirty(
         {
             tracked.encoder = None;
         }
-        if tracked.encoder.is_none() {
+        // Never a popup. A menu is the one surface the browser cannot size: it
+        // is whatever the client drew, so the encoder's rounding down to whole
+        // macroblocks would eat up to fifteen pixels of a menu's own edge, and
+        // H.264 has no alpha to carry the transparent margin a client leaves
+        // for its shadow, which arrives as a black frame around the menu.
+        // The pixel path has neither problem, and a menu is small and still.
+        if tracked.encoder.is_none() && anchor.is_none() {
             let (fourcc, modifier) = dmabuf
                 .as_ref()
                 .map_or((0, 0), |planes| (planes.fourcc, planes.modifier));
@@ -2278,12 +2382,14 @@ pub fn run_winit(
         server_decorated: HashSet::new(),
         requests: Vec::new(),
         popups: Vec::new(),
+        popup_manager: PopupManager::default(),
         dh: dh.clone(),
         clipboard: String::new(),
         copied,
         pastes,
         cursor: String::from("default"),
         announce_cursor: false,
+        announce_cursors: false,
     };
 
     let keyboard = state
@@ -2536,12 +2642,14 @@ pub fn run_headless(
         server_decorated: HashSet::new(),
         requests: Vec::new(),
         popups: Vec::new(),
+        popup_manager: PopupManager::default(),
         dh: dh.clone(),
         clipboard: String::new(),
         copied,
         pastes,
         cursor: String::from("default"),
         announce_cursor: false,
+        announce_cursors: false,
     };
 
     let keyboard = state
