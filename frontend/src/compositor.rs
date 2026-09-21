@@ -56,6 +56,7 @@ impl SurfaceRenderer {
             | ServerMessage::TrayMenu { .. }
             | ServerMessage::SurfaceRequest { .. }
             | ServerMessage::Cursor { .. }
+            | ServerMessage::Cursors { .. }
             | ServerMessage::Clipboard { .. }
             | ServerMessage::PointerConstraint { .. }
             | ServerMessage::Applications(_) => {}

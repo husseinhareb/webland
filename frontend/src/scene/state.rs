@@ -4,13 +4,15 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 use web_sys::HtmlCanvasElement;
 use webland_core::SurfaceId;
 use webland_protocol::{
-    Application, Codec, ServerMessage, SurfaceCreated, SurfaceFrame, TrayItem, TrayMenuItem,
-    WindowRequest,
+    Application, Codec, CursorShape, ServerMessage, SurfaceCreated, SurfaceFrame, TrayItem,
+    TrayMenuItem, WindowRequest,
 };
 
 use crate::compositor::SurfaceRenderer;
@@ -24,6 +26,51 @@ use super::{ActiveResize, AltTabState, Grab, SnapZone, Toast, WindowState};
 /// Pixels each new window is offset from the last, so windows opening at the
 /// same size do not land exactly on top of each other.
 const CASCADE: i32 = 34;
+
+/// One pointer shape ready for the stylesheet: the theme's picture as a data
+/// URL, with the hotspot to hang it by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorArt {
+    pub url: String,
+    pub width: u32,
+    pub height: u32,
+    pub hotspot_x: u32,
+    pub hotspot_y: u32,
+}
+
+impl CursorArt {
+    /// Paint a shape's pixels into a throwaway canvas and keep the PNG it
+    /// encodes, which is the only form CSS will take a picture in.
+    fn draw(shape: &CursorShape) -> Option<Self> {
+        let canvas: HtmlCanvasElement = web_sys::window()?
+            .document()?
+            .create_element("canvas")
+            .ok()?
+            .dyn_into()
+            .ok()?;
+        canvas.set_width(shape.width);
+        canvas.set_height(shape.height);
+        let ctx = canvas
+            .get_context("2d")
+            .ok()??
+            .dyn_into::<web_sys::CanvasRenderingContext2d>()
+            .ok()?;
+        let image = web_sys::ImageData::new_with_u8_clamped_array_and_sh(
+            wasm_bindgen::Clamped(&shape.rgba),
+            shape.width,
+            shape.height,
+        )
+        .ok()?;
+        ctx.put_image_data(&image, 0, 0).ok()?;
+        Some(Self {
+            url: canvas.to_data_url().ok()?,
+            width: shape.width,
+            height: shape.height,
+            hotspot_x: shape.hotspot_x,
+            hotspot_y: shape.hotspot_y,
+        })
+    }
+}
 
 /// Told that a surface's frame is on screen, and whether that surface is one
 /// the user can see. See [`Scene::on_presented`].
@@ -81,6 +128,11 @@ pub struct Scene {
     pub toasts: RwSignal<Vec<Toast>>,
     /// The active cursor icon shape (default, ns-resize, ew-resize, pointer, grab, etc.)
     pub cursor_icon: RwSignal<String>,
+    /// The host's cursor theme, keyed by the same shape names: what the shell
+    /// draws its own pointer with while a client holds the real one. Empty
+    /// until the compositor sends the theme, and empty for good on a host that
+    /// has none, which is what the stylesheet's fallback arrow is for.
+    pub cursors: RwSignal<Arc<HashMap<String, CursorArt>>>,
     /// Active window resize gesture: (`window_id`, `ActiveResize`)
     pub resizing: RwSignal<Option<(u64, ActiveResize)>>,
     /// Active window titlebar drag gesture: (`window_id`, Grab)
@@ -148,6 +200,7 @@ impl Scene {
             alt_tab: RwSignal::new(None),
             toasts: RwSignal::new(Vec::new()),
             cursor_icon: RwSignal::new(String::from("default")),
+            cursors: RwSignal::new(Arc::default()),
             resizing: RwSignal::new(None),
             titlebar_drag: RwSignal::new(None),
             titlebar_menu: RwSignal::new(None),
@@ -202,6 +255,13 @@ impl Scene {
                 self.paint(view, frame);
             }
             ServerMessage::Cursor { name } => self.cursor.set(name),
+            ServerMessage::Cursors { shapes } => {
+                let art = shapes
+                    .iter()
+                    .filter_map(|shape| Some((shape.name.clone(), CursorArt::draw(shape)?)))
+                    .collect();
+                self.cursors.set(Arc::new(art));
+            }
             // Straight onto the browser's clipboard: nothing in the shell wants
             // to hold a copy of it, and the point is to paste it elsewhere.
             ServerMessage::Clipboard { text } => crate::input::set_clipboard(&text),

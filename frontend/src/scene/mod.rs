@@ -21,5 +21,5 @@ pub use geometry::{
     ActiveResize, Grab, MIN_SURFACE, ResizeDirection, SnapZone, coord, desktop_bounds, drag_origin,
     element_at, maximized_size, pixel_ratio, pixels, whole_blocks, workspace_at,
 };
-pub use state::Scene;
+pub use state::{CursorArt, Scene};
 pub use window::{AltTabState, Toast, WindowState};
