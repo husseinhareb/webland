@@ -63,6 +63,14 @@ pub fn motion(
 ) {
     let dx = f64::from(event.movement_x());
     let dy = f64::from(event.movement_y());
+    crate::dbg::log(format!(
+        "DBG mousemove locked dx={dx} dy={dy} client=({},{}) screen=({},{}) dpr={}",
+        event.client_x(),
+        event.client_y(),
+        event.screen_x(),
+        event.screen_y(),
+        web_sys::window().map_or(0.0, |w| w.device_pixel_ratio())
+    ));
     if dx == 0.0 && dy == 0.0 {
         return;
     }
@@ -74,6 +82,9 @@ pub fn motion(
     let x = (cur_x + dx).clamp(0.0, max_w);
     let y = (cur_y + dy).clamp(0.0, max_h);
     scene.virtual_cursor.set(Some((x, y)));
+    crate::dbg::log(format!(
+        "DBG motion dx={dx} dy={dy} cur=({cur_x},{cur_y}) -> ({x},{y}) max=({max_w},{max_h})"
+    ));
 
     if grabbed_by_client(scene) {
         send(transport, InputEvent::PointerMotionRelative { dx, dy });

@@ -17,8 +17,36 @@ pub fn watch(scene: StoredValue<Scene, LocalStorage>) {
     let fullscreen = scene.with_value(|scene| scene.fullscreen);
     let virtual_cursor = scene.with_value(|scene| scene.virtual_cursor);
 
+    if let Some(doc) = document() {
+        let mut out = String::from("DBG layout ");
+        if let Some(w) = web_sys::window() {
+            out.push_str(&format!(
+                "inner={}x{} dpr={} ",
+                w.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(0.0),
+                w.inner_height()
+                    .ok()
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
+                w.device_pixel_ratio()
+            ));
+        }
+        if let Some(el) = doc.query_selector(".panel-btn").ok().flatten() {
+            let r = el.get_bounding_client_rect();
+            out.push_str(&format!(
+                "[{}: x={:.0} y={:.0} w={:.0} h={:.0}]",
+                el.text_content().unwrap_or_default(),
+                r.x(),
+                r.y(),
+                r.width(),
+                r.height()
+            ));
+        }
+        crate::dbg::log(out);
+    }
+
     on_document("pointerlockchange", move || {
         let locked = pointer_locked();
+        crate::dbg::log(format!("DBG pointerlockchange locked={locked}"));
         captured.set(locked);
         mark_body(locked);
         if locked {
@@ -32,6 +60,7 @@ pub fn watch(scene: StoredValue<Scene, LocalStorage>) {
         }
     });
     on_document("pointerlockerror", move || {
+        crate::dbg::log(String::from("DBG pointerlockerror"));
         captured.set(false);
         mark_body(false);
         unlock_keyboard();
