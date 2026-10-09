@@ -11,15 +11,20 @@
 //! browser does the layout: a window gets the size the browser is showing, a
 //! configure request is granted, and stacking is not the compositor's business.
 
+use std::borrow::Cow;
 use std::process::Stdio;
 
+use smithay::desktop::PopupKind;
+use smithay::input::Seat;
+use smithay::input::keyboard::{KeyboardTarget, KeysymHandle, ModifiersState};
 use smithay::reexports::calloop::{EventLoop, LoopHandle};
 use smithay::reexports::wayland_server::Display;
 use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::backend::ObjectId;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Logical, Rectangle};
+use smithay::utils::{IsAlive, Logical, Rectangle, Serial};
+use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
 use smithay::xwayland::xwm::{Reorder, ResizeEdge, XwmId};
 use smithay::xwayland::{X11Surface, X11Wm, XWayland, XWaylandEvent, XwmHandler};
@@ -310,10 +315,10 @@ const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 impl Webland {
     /// Tell the X windows which of them the browser just raised.
     ///
-    /// Keyboard focus itself is not set here, `XWayland` follows the Wayland
-    /// seat for that. This is the `_NET_WM_STATE_FOCUSED` hint, which is what an
-    /// X client reads to know whether to draw itself active or dimmed, and it
-    /// has no way to work that out from the Wayland side.
+    /// Keyboard focus itself is not set here, [`KeyboardFocus`] does that. This
+    /// is the `_NET_WM_STATE_FOCUSED` hint, which is what an X client reads to
+    /// know whether to draw itself active or dimmed, and it has no way to work
+    /// that out from the Wayland side.
     pub(crate) fn activate_x11(&self, focused: Option<&ObjectId>) {
         for window in &self.x11 {
             let is_focused = window.wl_surface().map(|s| s.id()).as_ref() == focused;
@@ -322,6 +327,131 @@ impl Webland {
             {
                 tracing::warn!(%err, "could not tell an X11 window it is focused");
             }
+        }
+    }
+
+    /// What to give the keyboard to for `surface`: its X window when it has
+    /// one, so the X side is told as well.
+    pub(crate) fn keyboard_focus(&self, surface: &WlSurface) -> KeyboardFocus {
+        self.x11
+            .iter()
+            .find(|window| window.wl_surface().as_ref() == Some(surface))
+            .map_or_else(
+                || KeyboardFocus::Wayland(surface.clone()),
+                |window| KeyboardFocus::X11(window.clone()),
+            )
+    }
+}
+
+/// Whatever holds the keyboard.
+///
+/// An X window has to be given the focus through X as well: rootless `XWayland`
+/// hands the client its keys on `wl_keyboard.enter`, but leaves X's own input
+/// focus to the window manager. A client asking X whether it is focused was
+/// told no, and GLFW asks before it grabs the mouse for a camera: a game that
+/// hid the cursor and never turned, since it was waiting on a `FocusIn` that
+/// never came. `X11Surface` sets X's focus on enter and clears it on leave.
+#[derive(Debug, Clone, PartialEq)]
+pub enum KeyboardFocus {
+    Wayland(WlSurface),
+    X11(X11Surface),
+}
+
+impl IsAlive for KeyboardFocus {
+    fn alive(&self) -> bool {
+        match self {
+            Self::Wayland(surface) => surface.alive(),
+            Self::X11(window) => window.alive(),
+        }
+    }
+}
+
+impl WaylandFocus for KeyboardFocus {
+    fn wl_surface(&self) -> Option<Cow<'_, WlSurface>> {
+        match self {
+            Self::Wayland(surface) => Some(Cow::Borrowed(surface)),
+            Self::X11(window) => window.wl_surface().map(Cow::Owned),
+        }
+    }
+}
+
+impl From<WlSurface> for KeyboardFocus {
+    fn from(surface: WlSurface) -> Self {
+        Self::Wayland(surface)
+    }
+}
+
+/// A popup's grab gives the keyboard back to the popup's own surface.
+impl From<PopupKind> for KeyboardFocus {
+    fn from(popup: PopupKind) -> Self {
+        Self::Wayland(popup.wl_surface().clone())
+    }
+}
+
+/// The pointer follows a popup grab's keyboard focus. A popup grab is only ever
+/// rooted on an `xdg` surface, so the X arm is here for the type alone; an X
+/// window without its surface yet cannot have been focused in the first place.
+impl From<KeyboardFocus> for WlSurface {
+    fn from(focus: KeyboardFocus) -> Self {
+        match focus {
+            KeyboardFocus::Wayland(surface) => surface,
+            KeyboardFocus::X11(window) => window
+                .wl_surface()
+                .expect("a focused X window has a surface"),
+        }
+    }
+}
+
+impl KeyboardTarget<Webland> for KeyboardFocus {
+    fn enter(
+        &self,
+        seat: &Seat<Webland>,
+        data: &mut Webland,
+        keys: Vec<KeysymHandle<'_>>,
+        serial: Serial,
+    ) {
+        match self {
+            Self::Wayland(surface) => KeyboardTarget::enter(surface, seat, data, keys, serial),
+            Self::X11(window) => KeyboardTarget::enter(window, seat, data, keys, serial),
+        }
+    }
+
+    fn leave(&self, seat: &Seat<Webland>, data: &mut Webland, serial: Serial) {
+        match self {
+            Self::Wayland(surface) => KeyboardTarget::leave(surface, seat, data, serial),
+            Self::X11(window) => KeyboardTarget::leave(window, seat, data, serial),
+        }
+    }
+
+    fn key(
+        &self,
+        seat: &Seat<Webland>,
+        data: &mut Webland,
+        key: KeysymHandle<'_>,
+        state: smithay::backend::input::KeyState,
+        serial: Serial,
+        time: u32,
+    ) {
+        match self {
+            Self::Wayland(surface) => {
+                KeyboardTarget::key(surface, seat, data, key, state, serial, time);
+            }
+            Self::X11(window) => KeyboardTarget::key(window, seat, data, key, state, serial, time),
+        }
+    }
+
+    fn modifiers(
+        &self,
+        seat: &Seat<Webland>,
+        data: &mut Webland,
+        modifiers: ModifiersState,
+        serial: Serial,
+    ) {
+        match self {
+            Self::Wayland(surface) => {
+                KeyboardTarget::modifiers(surface, seat, data, modifiers, serial);
+            }
+            Self::X11(window) => KeyboardTarget::modifiers(window, seat, data, modifiers, serial),
         }
     }
 }

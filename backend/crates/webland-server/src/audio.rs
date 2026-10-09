@@ -21,7 +21,8 @@
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
 
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::error::TrySendError;
 use webland_compositor::spawn::AUDIO_SINK;
 use webland_protocol::ServerMessage;
 
@@ -163,7 +164,7 @@ impl Drop for Capture {
 /// Returns `None` if `ffmpeg` is not installed or cannot open the sink, in
 /// which case the desktop is simply silent.
 #[must_use]
-pub fn capture(to_browser: UnboundedSender<ServerMessage>) -> Option<Capture> {
+pub fn capture(to_browser: Sender<ServerMessage>) -> Option<Capture> {
     let mut ffmpeg = Command::new("ffmpeg")
         .args([
             "-hide_banner",
@@ -213,14 +214,14 @@ pub fn capture(to_browser: UnboundedSender<ServerMessage>) -> Option<Capture> {
                 match stdout.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(read) => {
-                        if to_browser
-                            .send(ServerMessage::Audio {
-                                payload: buffer[..read].to_vec(),
-                            })
-                            .is_err()
-                        {
-                            // The browser is gone; so is the reason to encode.
-                            break;
+                        match to_browser.try_send(ServerMessage::Audio {
+                            payload: buffer[..read].to_vec(),
+                        }) {
+                            Ok(()) | Err(TrySendError::Full(_)) => {}
+                            Err(TrySendError::Closed(_)) => {
+                                // The browser is gone; so is the reason to encode.
+                                break;
+                            }
                         }
                     }
                     Err(err) => {

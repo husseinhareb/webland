@@ -473,13 +473,17 @@ impl Encoder {
         descriptor.nb_layers = 1;
         descriptor.layers[0].format = format;
         descriptor.layers[0].nb_planes = i32::try_from(planes.len()).ok().unwrap_or_default();
-        let mut objects: Vec<i32> = Vec::with_capacity(planes.len());
+        let mut objects = [0i32; 4];
+        let mut num_objects = 0usize;
         for (i, &(fd, offset, stride)) in planes.iter().enumerate() {
-            let object = if let Some(existing) = objects.iter().position(|&seen| seen == fd) {
+            let object = if let Some(existing) =
+                objects[..num_objects].iter().position(|&seen| seen == fd)
+            {
                 existing
             } else {
-                objects.push(fd);
-                let index = objects.len() - 1;
+                let index = num_objects;
+                objects[index] = fd;
+                num_objects += 1;
                 descriptor.objects[index].fd = fd;
                 descriptor.objects[index].size = 0;
                 descriptor.objects[index].format_modifier = modifier;
@@ -491,7 +495,7 @@ impl Encoder {
                 isize::try_from(offset).ok().unwrap_or_default();
             descriptor.layers[0].planes[i].pitch = isize::try_from(stride).ok().unwrap_or_default();
         }
-        descriptor.nb_objects = i32::try_from(objects.len()).ok().unwrap_or_default();
+        descriptor.nb_objects = i32::try_from(num_objects).ok().unwrap_or_default();
 
         // SAFETY: the frames and pools live as long as `self`, and the
         // descriptor is owned by `self` so it outlives the frame pointing at it.
@@ -715,6 +719,16 @@ impl Drop for Encoder {
 /// `av_buffer_create` insists on a free callback; the descriptor it wraps is
 /// owned by the [`Encoder`], so there is nothing here to free.
 unsafe extern "C" fn no_free(_opaque: *mut std::ffi::c_void, _data: *mut u8) {}
+
+/// Whether a client buffer in this DRM fourcc can go straight to the encoder.
+///
+/// The dmabuf global offers only these: a client offered more picks the richest
+/// (a Vulkan swapchain takes 16-bit float if it can), and a buffer the encoder
+/// cannot import is read back and deflated, at many times the CPU and bandwidth.
+#[must_use]
+pub fn imports(fourcc: u32) -> bool {
+    drm_to_pixel_format(fourcc).is_ok()
+}
 
 /// The software format behind a DRM fourcc, which is what the DRM frame pool
 /// wants to know.

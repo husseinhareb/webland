@@ -110,6 +110,25 @@ pub struct TrayItem {
     pub icon: Option<String>,
 }
 
+/// A desktop notification, from `org.freedesktop.Notifications`.
+///
+/// Plain text only: the server does not advertise `body-markup`, so clients
+/// send none, and the browser renders it as text, never as HTML.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Notification {
+    pub id: u32,
+    /// The application's display name, often empty.
+    pub app: String,
+    pub summary: String,
+    pub body: String,
+    /// The icon as a `data:` URL, when its name resolved in the icon theme.
+    pub icon: Option<String>,
+    /// How long to show it, as the specification counts: negative is the
+    /// viewer's own default, `0` is until dismissed, anything else is
+    /// milliseconds.
+    pub expire_timeout: i32,
+}
+
 /// One row of a tray item's menu.
 ///
 /// Flattened from `com.canonical.dbusmenu`, which is a tree of properties the
@@ -347,6 +366,19 @@ pub enum ServerMessage {
     Cursors {
         shapes: Vec<CursorShape>,
     },
+    /// The desktop wallpaper, sent on connect and whenever it changes.
+    ///
+    /// Empty/None when there is no wallpaper, leaving the stylesheet's gradient.
+    Wallpaper {
+        url: Option<String>,
+    },
+    /// An application raised a desktop notification, or replaced one it had
+    /// raised before under the same `id`.
+    Notification(Notification),
+    /// The application withdrew a notification before anyone dismissed it.
+    NotificationClosed {
+        id: u32,
+    },
 }
 
 /// One pointer shape, read from the host's cursor theme.
@@ -442,6 +474,13 @@ pub enum ClientMessage {
     /// server would have to spend a full surface periodically on the chance
     /// that someone is listening.
     RequestKeyframe,
+    /// A notification was clicked (`activated`) or closed by its button.
+    /// Either way it is gone; a click also tells the application, which
+    /// usually answers by presenting the window the notification was about.
+    NotificationClose { id: u32, activated: bool },
+    /// Interpret keys with this xkb layout and variant, the viewer's keyboard
+    /// rather than the host's. An empty layout goes back to the host's.
+    SetKeymap { layout: String, variant: String },
 }
 
 #[cfg(test)]

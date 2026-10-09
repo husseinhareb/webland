@@ -6,8 +6,10 @@
 //! drops the local window so the browser is the only display.
 
 mod audio;
+mod notify;
 mod transport;
 mod tray;
+mod wallpaper;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();

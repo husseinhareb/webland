@@ -538,7 +538,7 @@ fn property_int(properties: &HashMap<String, OwnedValue>, key: &str) -> Option<i
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
 
@@ -670,13 +670,13 @@ mod tests {
     /// A private `dbus-daemon`, so the test never touches the machine's own
     /// session bus; registering a watcher there would take tray icons away
     /// from whatever panel the user is actually running.
-    struct Bus {
-        address: String,
+    pub(crate) struct Bus {
+        pub(crate) address: String,
         child: std::process::Child,
     }
 
     impl Bus {
-        fn start() -> Option<Self> {
+        pub(crate) fn start() -> Option<Self> {
             let mut child = Command::new("dbus-daemon")
                 .args(["--session", "--nofork", "--print-address"])
                 .stdout(Stdio::piped())

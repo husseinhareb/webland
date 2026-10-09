@@ -21,6 +21,7 @@ tracing-subscriber = "0.3.23"
 webland-compositor.workspace = true
 webland-core.workspace = true
 webland-protocol.workspace = true
+axum = { version = "0.8.9", features = ["ws"] }
 
 [dev-dependencies]
 # `measure` needs a deadline; the server itself never sleeps.

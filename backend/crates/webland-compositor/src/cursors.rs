@@ -77,7 +77,9 @@ fn read(theme: &CursorTheme, shape: &str, size: u32) -> Option<CursorShape> {
     let images = parse_xcursor(&std::fs::read(path).ok()?)?;
     // An animated cursor repeats its size once per frame; the nearest match is
     // therefore the first frame of it, which is the one that gets drawn.
-    let image = images.iter().min_by_key(|image| image.size.abs_diff(size))?;
+    let image = images
+        .iter()
+        .min_by_key(|image| image.size.abs_diff(size))?;
     Some(CursorShape {
         name: shape.to_string(),
         width: image.width,
@@ -136,4 +138,3 @@ mod tests {
         assert_eq!(straight(&image), vec![255, 255, 255, 128, 255, 0, 0, 255]);
     }
 }
-

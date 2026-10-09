@@ -28,7 +28,15 @@ The panel is a real `StatusNotifier` host on that bus, so applications that
 publish a tray icon (nm-applet, Steam, anything Electron) appear at the end of
 the bar with their own icon and their own menu.
 
-Not there yet: application notifications, a settings UI, and authentication. The protocol has no auth at all, so bind it to localhost and put
+Application notifications land as toasts: Webland is the
+`org.freedesktop.Notifications` server on that same bus, and clicking one runs
+the application's default action.
+
+The chevron at the end of the panel holds the viewer's settings: wallpaper,
+clock format, network stats, do-not-disturb, and the keyboard layout, which is
+the viewer's keyboard rather than the host's and is applied live.
+
+Not there yet: HiDPI output scaling, and authentication. The protocol has no auth at all, so bind it to localhost and put
 a proxy in front if you want it elsewhere. [docs/roadmap.md](docs/roadmap.md)
 has the order of work, [docs/architecture.md](docs/architecture.md) the shape of
 the code.

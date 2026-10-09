@@ -506,7 +506,7 @@ mod tests {
         assert_eq!(before, vec![entry.clone()]);
 
         std::fs::remove_file(&entry).unwrap();
-        assert!(sources(&dirs).is_empty());
+        assert_eq!(sources(&dirs), Vec::<std::path::PathBuf>::new());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

@@ -12,13 +12,20 @@
 
 use std::net::SocketAddr;
 
+use axum::Router;
+use axum::extract::ws::{Message as AxumWsMessage, WebSocket, WebSocketUpgrade};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRef, State};
+use axum::response::Response;
+use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
+#[cfg(test)]
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use webland_protocol::{ClientMessage, ServerMessage, decode, encode};
 
 use crate::audio;
+use crate::notify::Notifications;
 use crate::tray::Tray;
 
 // Frames are not paced here. They are paced at the source, by the compositor's
@@ -63,7 +70,7 @@ impl FrameSink {
         let _ = self.frames.send(message);
     }
 
-    fn subscribe(&self) -> broadcast::Receiver<ServerMessage> {
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<ServerMessage> {
         self.frames.subscribe()
     }
 }
@@ -71,23 +78,25 @@ impl FrameSink {
 /// A connected browser: push [`ServerMessage`]s out, pull [`ClientMessage`]s in.
 ///
 /// Encoding/decoding and socket I/O run on background tasks; this handle just
+const OUTGOING_CAPACITY: usize = 64;
+
 /// moves typed messages across channels.
 #[derive(Debug)]
 pub struct Connection {
-    outgoing: mpsc::UnboundedSender<ServerMessage>,
+    outgoing: mpsc::Sender<ServerMessage>,
     incoming: mpsc::UnboundedReceiver<ClientMessage>,
 }
 
 impl Connection {
-    /// Queue a message for the browser. Returns `false` if the connection is gone.
+    /// Queue a message for the browser. Returns `false` if the connection is gone or channel is full.
     pub fn send(&self, message: ServerMessage) -> bool {
-        self.outgoing.send(message).is_ok()
+        self.outgoing.try_send(message).is_ok()
     }
 
     /// A handle for pushing messages from somewhere other than the frame loop;
     /// the audio capture, which produces on its own thread and at its own pace.
     #[must_use]
-    pub fn sender(&self) -> mpsc::UnboundedSender<ServerMessage> {
+    pub fn sender(&self) -> mpsc::Sender<ServerMessage> {
         self.outgoing.clone()
     }
 
@@ -102,16 +111,92 @@ pub async fn bind(addr: SocketAddr) -> std::io::Result<TcpListener> {
     TcpListener::bind(addr).await
 }
 
-/// Upgrade an accepted socket to WebSocket and return a [`Connection`].
-///
-/// Spawns a reader task (frame → `decode` → incoming) and a writer task
-/// (outgoing → `encode` → frame).
-///
-/// Separate from accepting the socket because the handshake waits on the peer:
-/// it is the peer's HTTP request that is being read. Run inline in the accept
-/// loop, one connection that never sends that request (a port scanner, a proxy
-/// probe, a browser on a stalled network) holds the loop open and no other
-/// browser can connect at all.
+#[derive(Clone)]
+struct AppState {
+    sink: FrameSink,
+    client: mpsc::UnboundedSender<ClientMessage>,
+    tray: Option<std::sync::Arc<Tray>>,
+    notifications: Option<std::sync::Arc<Notifications>>,
+}
+
+impl FromRef<AppState> for FrameSink {
+    fn from_ref(state: &AppState) -> Self {
+        state.sink.clone()
+    }
+}
+
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(state): State<AppState>,
+) -> Response {
+    ws.on_upgrade(move |socket| {
+        handle_ws(
+            socket,
+            peer,
+            state.sink,
+            state.client,
+            state.tray,
+            state.notifications,
+        )
+    })
+}
+
+async fn handle_ws(
+    socket: WebSocket,
+    peer: SocketAddr,
+    sink: FrameSink,
+    client_tx: mpsc::UnboundedSender<ClientMessage>,
+    tray: Option<std::sync::Arc<Tray>>,
+    notifications: Option<std::sync::Arc<Notifications>>,
+) {
+    tracing::info!(%peer, "browser connected");
+    let (mut writer, mut reader) = socket.split();
+
+    let (out_tx, mut out_rx) = mpsc::channel::<ServerMessage>(OUTGOING_CAPACITY);
+    let (in_tx, in_rx) = mpsc::unbounded_channel::<ClientMessage>();
+
+    tokio::spawn(async move {
+        while let Some(message) = out_rx.recv().await {
+            match encode(&message) {
+                Ok(bytes) => {
+                    if writer
+                        .send(AxumWsMessage::Binary(bytes.into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(err) => tracing::error!(%err, "failed to encode outgoing frame"),
+            }
+        }
+    });
+
+    tokio::spawn(async move {
+        while let Some(Ok(frame)) = reader.next().await {
+            if let AxumWsMessage::Binary(bytes) = frame {
+                match decode::<ClientMessage>(bytes.as_ref()) {
+                    Ok(message) => {
+                        if in_tx.send(message).is_err() {
+                            break;
+                        }
+                    }
+                    Err(err) => tracing::warn!(%err, "dropping undecodable frame"),
+                }
+            }
+        }
+    });
+
+    let connection = Connection {
+        outgoing: out_tx,
+        incoming: in_rx,
+    };
+
+    serve_connection(connection, peer, sink, client_tx, tray, notifications).await;
+}
+
+#[cfg(test)]
 async fn upgrade(
     stream: tokio::net::TcpStream,
     peer: SocketAddr,
@@ -120,7 +205,7 @@ async fn upgrade(
     tracing::info!(%peer, "browser connected");
     let (mut writer, mut reader) = ws.split();
 
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let (out_tx, mut out_rx) = mpsc::channel::<ServerMessage>(OUTGOING_CAPACITY);
     let (in_tx, in_rx) = mpsc::unbounded_channel::<ClientMessage>();
 
     tokio::spawn(async move {
@@ -162,20 +247,14 @@ async fn upgrade(
 /// Everything a connection owns lives for exactly as long as this call: its
 /// audio capture, its subscription to the frame stream, and the tray snapshot
 /// it is sent on arrival.
-async fn serve(
-    stream: tokio::net::TcpStream,
+async fn serve_connection(
+    mut connection: Connection,
     peer: SocketAddr,
     sink: FrameSink,
     client_tx: mpsc::UnboundedSender<ClientMessage>,
     tray: Option<std::sync::Arc<Tray>>,
+    notifications: Option<std::sync::Arc<Notifications>>,
 ) {
-    let mut connection = match upgrade(stream, peer).await {
-        Ok(connection) => connection,
-        Err(err) => {
-            tracing::warn!(%err, %peer, "websocket handshake failed");
-            return;
-        }
-    };
     // This browser's own audio stream, for as long as it
     // is connected: the capture stops when `_audio` drops
     // at the end of this task.
@@ -188,10 +267,15 @@ async fn serve(
         tokio::spawn(async move {
             let items = tray.snapshot().await;
             if !items.is_empty() {
-                let _ = to_browser.send(ServerMessage::Tray { items });
+                let _ = to_browser.send(ServerMessage::Tray { items }).await;
             }
         });
     }
+
+    // Inform browser of the current wallpaper stored on the server:
+    let wallpaper_url = crate::wallpaper::load_url();
+    let _ = connection.send(ServerMessage::Wallpaper { url: wallpaper_url });
+
     // Subscribed once there is somewhere to put the frames:
     // a subscription nobody reads from fills up and reports
     // a lag that costs everyone a keyframe.
@@ -220,7 +304,8 @@ async fn serve(
                         tokio::spawn(async move {
                             let items = tray.menu(&id).await;
                             let _ = to_browser
-                                .send(ServerMessage::TrayMenu { id, items });
+                                .send(ServerMessage::TrayMenu { id, items })
+                                .await;
                         });
                     }
                 }
@@ -228,6 +313,13 @@ async fn serve(
                     if let Some(tray) = tray.clone() {
                         tokio::spawn(async move {
                             tray.click(&id, item).await;
+                        });
+                    }
+                }
+                Some(ClientMessage::NotificationClose { id, activated }) => {
+                    if let Some(notifications) = notifications.clone() {
+                        tokio::spawn(async move {
+                            notifications.close(id, activated).await;
                         });
                     }
                 }
@@ -259,7 +351,7 @@ async fn serve(
     tracing::info!(%peer, "browser disconnected");
 }
 
-/// Run a WebSocket server on a background thread.
+/// Run a WebSocket and HTTP API server on a background thread.
 ///
 /// Each connected browser receives every frame the compositor pushes into
 /// `sink`, and everything it sends back, input, and the frame acks that pace
@@ -290,6 +382,7 @@ pub fn spawn_server(
                 // as long as the server runs, and every connected browser is
                 // told the same list.
                 let tray = Tray::start(sink.clone(), bus.as_deref()).await;
+                let notifications = Notifications::start(sink.clone(), bus.as_deref()).await;
 
                 let listener = match bind(addr).await {
                     Ok(listener) => listener,
@@ -300,20 +393,42 @@ pub fn spawn_server(
                 };
                 tracing::info!(%addr, "websocket transport listening");
 
-                loop {
-                    let (stream, peer) = match listener.accept().await {
-                        Ok(accepted) => accepted,
-                        Err(err) => {
-                            tracing::warn!(%err, "websocket accept failed");
-                            continue;
-                        }
-                    };
-                    // Handshake and serve on a task of their own, so the next
-                    // browser is accepted while this one is still upgrading.
-                    let sink = sink.clone();
-                    let client_tx = client.clone();
-                    let tray = tray.clone();
-                    tokio::spawn(serve(stream, peer, sink, client_tx, tray));
+                let state = AppState {
+                    sink: sink.clone(),
+                    client: client.clone(),
+                    tray,
+                    notifications,
+                };
+
+                let app = Router::new()
+                    .route("/ws", get(ws_handler))
+                    .route("/", get(ws_handler))
+                    .route(
+                        "/api/wallpaper",
+                        get(crate::wallpaper::get_wallpaper)
+                            .post(crate::wallpaper::post_wallpaper)
+                            .delete(crate::wallpaper::delete_wallpaper),
+                    )
+                    .route(
+                        "/wallpaper",
+                        get(crate::wallpaper::get_wallpaper)
+                            .post(crate::wallpaper::post_wallpaper)
+                            .delete(crate::wallpaper::delete_wallpaper),
+                    )
+                    .layer(DefaultBodyLimit::max(30 * 1024 * 1024))
+                    .with_state(state);
+
+                let make_service = app.into_make_service_with_connect_info::<SocketAddr>();
+                // Frames and acks are small writes in a ping-pong: with Nagle on,
+                // each one waits out the peer's 40ms delayed ack, which alone
+                // held the stream to 24 frames a second.
+                let listener = axum::serve::ListenerExt::tap_io(listener, |tcp| {
+                    if let Err(err) = tcp.set_nodelay(true) {
+                        tracing::warn!(%err, "could not set TCP_NODELAY");
+                    }
+                });
+                if let Err(err) = axum::serve(listener, make_service).await {
+                    tracing::error!(%err, "server error");
                 }
             });
         });

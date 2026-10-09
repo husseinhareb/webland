@@ -32,6 +32,7 @@
 /// Re-exported so downstream crates pin one Wayland stack.
 pub use smithay;
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::os::unix::io::OwnedFd;
 use std::sync::Arc;
@@ -91,6 +92,7 @@ use smithay::reexports::wayland_server::{Client, Display, ListeningSocket, Resou
 use smithay::reexports::winit::platform::pump_events::PumpStatus;
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial, Transform};
 use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
+use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes, TraversalAction,
@@ -290,7 +292,10 @@ impl XdgShellHandler for Webland {
         if surface.send_configure().is_err() {
             return;
         }
-        if let Err(err) = self.popup_manager.track_popup(PopupKind::Xdg(surface.clone())) {
+        if let Err(err) = self
+            .popup_manager
+            .track_popup(PopupKind::Xdg(surface.clone()))
+        {
             tracing::warn!(%err, "could not track a popup");
         }
         self.popups.push(surface);
@@ -317,7 +322,10 @@ impl XdgShellHandler for Webland {
         let Ok(root) = find_popup_root_surface(&popup) else {
             return;
         };
-        let grab = match self.popup_manager.grab_popup(root, popup, &seat, serial) {
+        let grab = match self
+            .popup_manager
+            .grab_popup(root.into(), popup, &seat, serial)
+        {
             Ok(grab) => grab,
             Err(err) => {
                 tracing::debug!(%err, "a popup was refused its grab");
@@ -461,7 +469,7 @@ impl DmabufHandler for Webland {
 }
 
 impl SeatHandler for Webland {
-    type KeyboardFocus = WlSurface;
+    type KeyboardFocus = xwayland::KeyboardFocus;
     type PointerFocus = WlSurface;
     type TouchFocus = WlSurface;
 
@@ -469,8 +477,10 @@ impl SeatHandler for Webland {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
-        let client = focused.and_then(|s| self.dh.get_client(s.id()).ok());
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&xwayland::KeyboardFocus>) {
+        let client = focused
+            .and_then(WaylandFocus::wl_surface)
+            .and_then(|s| self.dh.get_client(s.id()).ok());
         set_data_device_focus(&self.dh, seat, client.clone());
         set_primary_focus(&self.dh, seat, client);
     }
@@ -504,7 +514,19 @@ impl SeatHandler for Webland {
 impl smithay::wayland::tablet_manager::TabletSeatHandler for Webland {}
 
 impl PointerConstraintsHandler for Webland {
+    /// Only the focused window may take the pointer. A game in the background
+    /// that locks would otherwise blank the cursor out from under whatever the
+    /// user is using; its lock waits, and `stream_dirty` activates it if and
+    /// when the window is focused.
     fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
+        let focused = self.seat.get_keyboard().and_then(|k| k.current_focus());
+        if focused
+            .and_then(|f| f.wl_surface().map(Cow::into_owned))
+            .as_ref()
+            != Some(surface)
+        {
+            return;
+        }
         with_pointer_constraint(surface, pointer, |constraint| {
             if let Some(c) = constraint
                 && !c.is_active()
@@ -920,11 +942,11 @@ fn to_key_state(press: Press) -> KeyState {
     }
 }
 
-/// How many frame callbacks may be outstanding before the browser has to catch
-/// up. >1 so a client is not stalled by a single round trip.
+/// How many frames may be in flight before the browser has to catch up. >1 so a
+/// client is not stalled by a single round trip.
 const INITIAL_FRAME_CREDIT: i32 = 2;
 
-/// Fire callbacks this often even with no credit, so clients still make progress
+/// Fire callbacks this often even with the pipe full, so clients still make progress
 /// when no browser is attached (otherwise nothing ever renders, nothing is ever
 /// sent, and no ack can arrive, a deadlock).
 const IDLE_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
@@ -939,15 +961,25 @@ const FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16)
 /// drop frames rather than build a queue nobody wants to watch.
 const MAX_FRAME_CREDIT: i32 = 12;
 
+/// How long a sent frame may go unacknowledged before it stops counting as in
+/// flight. Frames sent with no browser attached, or to one that has since gone,
+/// are never acked; kept, they would hold the pipe shut and pair every later ack
+/// with the wrong send, which read a loopback round trip as seconds.
+const STALE_FRAME: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Paces `wl_surface.frame` callbacks against the browser (Decision 3).
 ///
 /// Wayland clients redraw only when the compositor fires their frame callback.
 /// Firing on the compositor's own loop rate lets a client run ahead of a browser
 /// that cannot keep up: it renders into frames the pacer then discards, and
-/// latency grows without bound. So a callback costs credit, and credit comes
-/// from the browser saying it presented.
+/// latency grows without bound. So only so many frames may be in flight, and a
+/// frame leaves flight when the browser says it presented.
+///
+/// Counted by frames sent rather than callbacks fired: a callback the client
+/// answers with no frame (it had nothing to draw, or the encoder is holding the
+/// picture) never gets an ack, and counting it leaked the pipe down to one frame
+/// per round trip, 30 frames a second on loopback.
 struct FrameClock {
-    credit: i32,
     /// How many frames may be in flight at once. Adaptive: see [`FrameClock::on_ack`].
     ceiling: i32,
     last_tick: std::time::Instant,
@@ -963,7 +995,6 @@ struct FrameClock {
 impl FrameClock {
     fn new() -> Self {
         Self {
-            credit: INITIAL_FRAME_CREDIT,
             ceiling: INITIAL_FRAME_CREDIT,
             last_tick: std::time::Instant::now(),
             sent: std::collections::VecDeque::new(),
@@ -1003,13 +1034,19 @@ impl FrameClock {
                 .saturating_add(INITIAL_FRAME_CREDIT)
                 .clamp(INITIAL_FRAME_CREDIT, MAX_FRAME_CREDIT);
         }
-        self.credit = (self.credit + 1).min(self.ceiling);
     }
 
     /// Whether to fire frame callbacks this iteration.
     fn should_tick(&mut self, now: std::time::Instant) -> bool {
-        if self.credit > 0 {
-            self.credit -= 1;
+        while self
+            .sent
+            .front()
+            .is_some_and(|sent| now.saturating_duration_since(*sent) > STALE_FRAME)
+        {
+            self.sent.pop_front();
+        }
+        #[allow(clippy::cast_sign_loss)]
+        if self.sent.len() < self.ceiling as usize {
             self.last_tick = now;
             return true;
         }
@@ -1078,11 +1115,7 @@ fn xkb_config() -> XkbConfig<'static> {
         Box::leak(value.into_boxed_str())
     }
 
-    let layout = std::env::var("WEBLAND_LAYOUT")
-        .ok()
-        .or_else(host_layout)
-        .unwrap_or_default();
-    let variant = std::env::var("WEBLAND_VARIANT").unwrap_or_default();
+    let (layout, variant) = default_layout();
     if !layout.is_empty() {
         tracing::info!(%layout, %variant, "keyboard layout");
     }
@@ -1091,6 +1124,16 @@ fn xkb_config() -> XkbConfig<'static> {
         variant: leak(variant),
         ..XkbConfig::default()
     }
+}
+
+/// The layout and variant to use when the browser has not chosen one.
+fn default_layout() -> (String, String) {
+    let layout = std::env::var("WEBLAND_LAYOUT")
+        .ok()
+        .or_else(host_layout)
+        .unwrap_or_default();
+    let variant = std::env::var("WEBLAND_VARIANT").unwrap_or_default();
+    (layout, variant)
 }
 
 /// The host's configured X11/xkb layout, as systemd records it.
@@ -1692,11 +1735,31 @@ fn drain_client(
             ClientMessage::Launch { id } => launching.push(id),
             ClientMessage::SetMaximized { id, size } => maximizing.push((id, size)),
             ClientMessage::SetSize { id, size } => sizing.push((id, size)),
+            // Applied in the drain, ahead of this batch's keys, so a key typed
+            // right after the change is read with the new layout.
+            ClientMessage::SetKeymap { layout, variant } => {
+                let (layout, variant) = if layout.is_empty() {
+                    default_layout()
+                } else {
+                    (layout, variant)
+                };
+                let config = XkbConfig {
+                    layout: &layout,
+                    variant: &variant,
+                    ..XkbConfig::default()
+                };
+                // An unknown layout is refused by xkb and the old one stays.
+                match keyboard.set_xkb_config(state, config) {
+                    Ok(()) => tracing::info!(%layout, %variant, "keyboard layout"),
+                    Err(err) => tracing::warn!(?err, %layout, %variant, "keyboard layout refused"),
+                }
+            }
             // The tray lives on the session bus and is the server's business;
             // these are answered before they ever reach the compositor.
             ClientMessage::TrayActivate { .. }
             | ClientMessage::TrayMenuOpen { .. }
-            | ClientMessage::TrayMenuClick { .. } => {}
+            | ClientMessage::TrayMenuClick { .. }
+            | ClientMessage::NotificationClose { .. } => {}
         }
     }
     if focus_changed {
@@ -1817,10 +1880,11 @@ fn drain_client(
     // The keyboard follows the focus, and only when it actually changes:
     // re-focusing what is already focused makes smithay resend `enter` and
     // `modifiers` for nothing.
-    if let Some(surface) = &target
-        && keyboard.current_focus().as_ref() != Some(surface)
-    {
-        keyboard.set_focus(state, Some(surface.clone()), SERIAL_COUNTER.next_serial());
+    if let Some(surface) = &target {
+        let focus = state.keyboard_focus(surface);
+        if keyboard.current_focus().as_ref() != Some(&focus) {
+            keyboard.set_focus(state, Some(focus), SERIAL_COUNTER.next_serial());
+        }
     }
     for event in events {
         // The pointer follows the cursor. A motion or a wheel names the
@@ -1872,6 +1936,12 @@ struct Tracked {
     /// Built on first use and thrown away on resize, since both the filter graph
     /// and the encoder bake the dimensions in.
     encoder: Option<encode::Encoder>,
+    /// What an encoder last failed to be built for: buffer size, input, fourcc
+    /// and modifier. Not retried until one of those changes, since building one
+    /// opens a VA-API device and a filter graph, and doing that on every commit
+    /// of a surface that will never encode cost more than the deflate it fell
+    /// back to.
+    unencodable: Option<(Size, encode::Input, u32, u64)>,
     /// This surface's own pacing. One clock for the whole desktop would let a
     /// busy window spend the frame callbacks owed to the quiet ones.
     clock: FrameClock,
@@ -1965,6 +2035,7 @@ fn stream_dirty(
                 commits: Vec::new(),
                 pixels: Vec::new(),
                 encoder: None,
+                unencodable: None,
                 clock: FrameClock::new(),
                 title: None,
                 app_id: None,
@@ -2066,10 +2137,11 @@ fn stream_dirty(
         // H.264 has no alpha to carry the transparent margin a client leaves
         // for its shadow, which arrives as a black frame around the menu.
         // The pixel path has neither problem, and a menu is small and still.
-        if tracked.encoder.is_none() && anchor.is_none() {
-            let (fourcc, modifier) = dmabuf
-                .as_ref()
-                .map_or((0, 0), |planes| (planes.fourcc, planes.modifier));
+        let (fourcc, modifier) = dmabuf
+            .as_ref()
+            .map_or((0, 0), |planes| (planes.fourcc, planes.modifier));
+        let attempt = (size, wanted, fourcc, modifier);
+        if tracked.encoder.is_none() && anchor.is_none() && tracked.unencodable != Some(attempt) {
             match encode::Encoder::new(
                 &render_node(),
                 size.width,
@@ -2079,8 +2151,19 @@ fn stream_dirty(
                 fourcc,
                 modifier,
             ) {
-                Ok(encoder) => tracked.encoder = Some(encoder),
-                Err(err) => tracing::debug!(%err, "no H.264 encoder; sending deflate"),
+                Ok(encoder) => {
+                    tracked.encoder = Some(encoder);
+                    tracked.unencodable = None;
+                }
+                Err(err) => {
+                    tracked.unencodable = Some(attempt);
+                    tracing::debug!(
+                        %err,
+                        fourcc = %String::from_utf8_lossy(&fourcc.to_le_bytes()),
+                        modifier = format_args!("{modifier:#x}"),
+                        "no H.264 encoder; sending deflate"
+                    );
+                }
             }
         }
         // What the browser will actually be shown: the encoder's picture where
@@ -2459,7 +2542,7 @@ pub fn run_winit(
             WinitEvent::Input(BackendInputEvent::PointerMotionAbsolute { .. }) => {
                 if let Some(surface) = state.xdg_shell_state.toplevel_surfaces().iter().next() {
                     let surface = surface.wl_surface().clone();
-                    keyboard.set_focus(&mut state, Some(surface), 0.into());
+                    keyboard.set_focus(&mut state, Some(surface.into()), 0.into());
                 }
             }
             _ => {}
@@ -2592,7 +2675,9 @@ pub fn run_headless(
         let formats: Vec<_> = renderer
             .dmabuf_formats()
             .iter()
-            .filter(|format| format.modifier == Modifier::Linear)
+            .filter(|format| {
+                format.modifier == Modifier::Linear && encode::imports(format.code as u32)
+            })
             .copied()
             .collect();
         let feedback = DmabufFeedbackBuilder::new(*device, formats).build()?;
@@ -2772,8 +2857,8 @@ delegate_relative_pointer!(Webland);
 #[cfg(test)]
 mod tests {
     use super::{
-        FrameClock, IDLE_FRAME_INTERVAL, INITIAL_FRAME_CREDIT, MAX_FRAME_CREDIT, ancestry,
-        changed_region, clip, crop, pointer_surface, preferred_mime,
+        FrameClock, IDLE_FRAME_INTERVAL, INITIAL_FRAME_CREDIT, MAX_FRAME_CREDIT, STALE_FRAME,
+        ancestry, changed_region, clip, crop, pointer_surface, preferred_mime,
     };
     use std::time::{Duration, Instant};
     use webland_core::{Point, Rect, Size, SurfaceId};
@@ -2857,7 +2942,7 @@ mod tests {
         };
         assert_eq!(ancestry(Some(3), parents), vec![3, 2, 1]);
         assert_eq!(ancestry(Some(1), parents), vec![1]);
-        assert!(ancestry(None::<u32>, parents).is_empty());
+        assert_eq!(ancestry(None::<u32>, parents), Vec::<u32>::new());
         // A client that describes a cycle gets a finite answer, not a hang.
         assert_eq!(
             ancestry(Some(9), |id: &u32| Some(if *id == 9 { 8 } else { 9 })),
@@ -2915,24 +3000,45 @@ mod tests {
         let packed = crop(&buffer, 0, stride, rect(1, 1, 2, 1));
         assert_eq!(packed, vec![1u8; 8]);
         // Short buffer: return nothing rather than read off the end.
-        assert!(crop(&buffer[..stride as usize], 0, stride, rect(0, 1, 4, 1)).is_empty());
+        assert_eq!(
+            crop(&buffer[..stride as usize], 0, stride, rect(0, 1, 4, 1)),
+            Vec::<u8>::new()
+        );
     }
 
     #[test]
-    fn frame_clock_spends_credit_then_waits_for_the_browser() {
+    fn frame_clock_fills_the_pipe_then_waits_for_the_browser() {
         let now = Instant::now();
         let mut clock = FrameClock::new();
 
         // Clients may render a little before any browser has presented.
         for _ in 0..INITIAL_FRAME_CREDIT {
             assert!(clock.should_tick(now));
+            clock.on_send(now);
         }
-        // Out of credit: no more callbacks until the browser catches up, so the
+        // Pipe full: no more callbacks until the browser catches up, so the
         // client cannot run ahead into frames that will be discarded.
         assert!(!clock.should_tick(now));
 
         clock.on_ack(now);
         assert!(clock.should_tick(now));
+        clock.on_send(now);
+        assert!(!clock.should_tick(now));
+    }
+
+    #[test]
+    fn frame_clock_does_not_leak_callbacks_that_drew_nothing() {
+        let now = Instant::now();
+        let mut clock = FrameClock::new();
+        // A client that is called back and has nothing to draw sends no frame,
+        // so nothing will ever be acked for it. That must not cost the pipe a
+        // slot, or a few idle moments leave it running one frame per round trip.
+        for _ in 0..10 {
+            assert!(clock.should_tick(now));
+        }
+        for _ in 0..INITIAL_FRAME_CREDIT {
+            clock.on_send(now);
+        }
         assert!(!clock.should_tick(now));
     }
 
@@ -2942,13 +3048,34 @@ mod tests {
         let mut clock = FrameClock::new();
         for _ in 0..INITIAL_FRAME_CREDIT {
             assert!(clock.should_tick(start));
+            clock.on_send(start);
         }
         assert!(!clock.should_tick(start));
 
         // Without this, a compositor whose browser never connects would stall
-        // every client forever: no render, no frame, no ack, no credit.
+        // every client forever: no render, no frame, no ack, no room.
         assert!(clock.should_tick(start + IDLE_FRAME_INTERVAL));
         assert!(!clock.should_tick(start + IDLE_FRAME_INTERVAL));
+    }
+
+    #[test]
+    fn frame_clock_forgets_frames_nobody_will_ack() {
+        let start = Instant::now();
+        let mut clock = FrameClock::new();
+        // Sent before any browser connected: never acked.
+        for _ in 0..INITIAL_FRAME_CREDIT {
+            clock.on_send(start);
+        }
+        let later = start + STALE_FRAME + Duration::from_millis(1);
+        assert!(
+            clock.should_tick(later),
+            "stale frames must not hold the pipe"
+        );
+
+        // And the next ack pairs with its own send, not one from before.
+        clock.on_send(later);
+        clock.on_ack(later + Duration::from_millis(5));
+        assert_eq!(clock.round_trip, Duration::from_millis(5));
     }
 
     #[test]
@@ -2963,6 +3090,7 @@ mod tests {
         }
         for _ in 0..INITIAL_FRAME_CREDIT {
             assert!(clock.should_tick(now));
+            clock.on_send(now);
         }
         assert!(!clock.should_tick(now));
     }
@@ -2980,6 +3108,7 @@ mod tests {
         }
         let mut ticks = 0;
         while clock.should_tick(now) {
+            clock.on_send(now);
             ticks += 1;
         }
         assert!(
