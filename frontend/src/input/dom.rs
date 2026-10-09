@@ -187,6 +187,9 @@ pub fn element_cursor_icon(el: &Element, guest_cursor: &str) -> &'static str {
             "nesw-resize" => "nesw-resize",
             "grab" => "grab",
             "grabbing" => "grabbing",
+            // The client hid its pointer, a game drawing its own: nothing is
+            // drawn over it, which is what the shell's cursor checks for.
+            "none" => "none",
             _ => "default",
         };
     }

@@ -1,6 +1,8 @@
 //! The desktop shell: the root component, and the pointer-lock, fullscreen and
 //! client-driven-move plumbing that only the root element sees.
 
+#![allow(clippy::too_many_lines)]
+
 use std::rc::Rc;
 
 use leptos::html::Main;
@@ -16,7 +18,7 @@ use super::chrome::{AltTabModal, ToastContainer};
 use super::connect::connect;
 use super::panel::Panel;
 use super::window::Window;
-use super::{capture, drag, wallpaper};
+use super::{capture, drag, marquee, wallpaper};
 
 /// How much of the desktop a newly opened window takes up.
 const WINDOW_FRACTION: f64 = 0.62;
@@ -115,13 +117,37 @@ pub fn Desktop() -> impl IntoView {
     });
 
     let drag = drag::ClientDrag::new(scene, transport);
+    let marquee = marquee::DesktopMarquee::new(desktop_ref, scene);
 
     view! {
         <main node_ref=desktop_ref id="webland-desktop"
               style=move || wallpaper::style(wallpaper.get().as_ref())
-              on:pointermove=move |event: PointerEvent| drag.moved(&event)
-              on:pointerup=move |_| drag.dropped()
-              on:pointercancel=move |_| drag.dropped()>
+              on:pointerdown=move |event: PointerEvent| marquee.down(&event)
+              on:pointermove=move |event: PointerEvent| {
+                  drag.moved(&event);
+                  marquee.moved(&event);
+              }
+              on:pointerup=move |event: PointerEvent| {
+                  drag.dropped();
+                  marquee.up(&event);
+              }
+              on:pointercancel=move |_event: PointerEvent| {
+                  drag.dropped();
+                  marquee.cancel();
+              }>
+            {move || {
+                marquee.rect().map(|rect| {
+                    view! {
+                        <div
+                            class="desktop-marquee-box"
+                            style=format!(
+                                "left: {:.0}px; top: {:.0}px; width: {:.0}px; height: {:.0}px;",
+                                rect.x, rect.y, rect.width, rect.height
+                            )
+                        />
+                    }
+                })
+            }}
             {move || {
                 captured.get().then(|| {
                     view! {
@@ -162,14 +188,15 @@ pub fn Desktop() -> impl IntoView {
             </For>
             <Panel scene=scene transport=transport />
             <AltTabModal scene=scene transport=transport />
-            <ToastContainer scene=scene />
+            <ToastContainer scene=scene transport=transport />
         </main>
     }
 }
 
 /// Where the virtual cursor is drawn, and whether it is drawn at all: not while
 /// the real pointer is loose, and not while a client holds it for its own
-/// camera, since that client draws its own crosshair.
+/// camera or has hidden it over its window, since that client draws its own
+/// crosshair.
 fn cursor_style(
     scene: StoredValue<Scene, LocalStorage>,
     captured: bool,
@@ -180,10 +207,8 @@ fn cursor_style(
             .windows
             .with(|ws| ws.iter().any(|w| w.pointer_locked && !w.minimized))
     });
-    crate::dbg::log(format!(
-        "DBG cursor_style captured={captured} grabbed={grabbed} at={at:?}"
-    ));
-    if !captured || grabbed {
+    let hidden = scene.with_value(|scene| scene.cursor_icon.get() == "none");
+    if !captured || grabbed || hidden {
         return String::from("display: none;");
     }
     let (cx, cy) = at.unwrap_or_else(|| {

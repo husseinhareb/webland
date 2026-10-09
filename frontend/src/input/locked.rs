@@ -24,7 +24,7 @@ use super::dom::{
     resize_dir_of_element, surface_position_at, window_id_of_element,
 };
 use super::keymap::evdev_button;
-use super::pointer::{ClickState, LastClick, Pressed};
+use super::pointer::{ClickState, Hovered, LastClick, Pressed};
 use super::wire::send;
 
 /// Is a client holding the pointer for its own camera?
@@ -60,17 +60,10 @@ pub fn motion(
     transport: &WebSocketTransport,
     doc: Option<&Document>,
     event: &MouseEvent,
+    hovered: &Hovered,
 ) {
     let dx = f64::from(event.movement_x());
     let dy = f64::from(event.movement_y());
-    crate::dbg::log(format!(
-        "DBG mousemove locked dx={dx} dy={dy} client=({},{}) screen=({},{}) dpr={}",
-        event.client_x(),
-        event.client_y(),
-        event.screen_x(),
-        event.screen_y(),
-        web_sys::window().map_or(0.0, |w| w.device_pixel_ratio())
-    ));
     if dx == 0.0 && dy == 0.0 {
         return;
     }
@@ -82,9 +75,6 @@ pub fn motion(
     let x = (cur_x + dx).clamp(0.0, max_w);
     let y = (cur_y + dy).clamp(0.0, max_h);
     scene.virtual_cursor.set(Some((x, y)));
-    crate::dbg::log(format!(
-        "DBG motion dx={dx} dy={dy} cur=({cur_x},{cur_y}) -> ({x},{y}) max=({max_w},{max_h})"
-    ));
 
     if grabbed_by_client(scene) {
         send(transport, InputEvent::PointerMotionRelative { dx, dy });
@@ -101,13 +91,25 @@ pub fn motion(
         return;
     }
     let Some(el) = element_at(doc, x, y) else {
+        if let Some(prev) = hovered.borrow_mut().take() {
+            dispatch_pointer_event(&prev, "pointerleave", x, y, -1);
+            if let Ok(Some(btn)) = prev.closest("button") {
+                dispatch_pointer_event(&btn, "pointerleave", x, y, -1);
+            }
+        }
         return;
     };
     show_cursor(scene, &el);
-    if let Ok(canvas) = el.dyn_into::<HtmlCanvasElement>()
+    if let Ok(canvas) = el.clone().dyn_into::<HtmlCanvasElement>()
         && let Some(id) = canvas_surface_id(&canvas)
         && let Some(position) = surface_position_at(&canvas, x, y)
     {
+        if let Some(prev) = hovered.borrow_mut().take() {
+            dispatch_pointer_event(&prev, "pointerleave", x, y, -1);
+            if let Ok(Some(btn)) = prev.closest("button") {
+                dispatch_pointer_event(&btn, "pointerleave", x, y, -1);
+            }
+        }
         send(
             transport,
             InputEvent::PointerMotion {
@@ -115,7 +117,32 @@ pub fn motion(
                 position,
             },
         );
+    } else {
+        update_hover(hovered, &el, x, y);
     }
+}
+
+fn update_hover(hovered: &Hovered, el: &web_sys::Element, x: f64, y: f64) {
+    let prev = hovered.borrow().clone();
+    let is_same = prev.as_ref().is_some_and(|p| p == el);
+    if !is_same {
+        if let Some(ref prev_el) = prev {
+            dispatch_pointer_event(prev_el, "pointerleave", x, y, -1);
+            let prev_btn = prev_el.closest("button").ok().flatten();
+            let curr_btn = el.closest("button").ok().flatten();
+            if let Some(p_btn) = prev_btn
+                && curr_btn.as_ref() != Some(&p_btn)
+            {
+                dispatch_pointer_event(&p_btn, "pointerleave", x, y, -1);
+            }
+        }
+        hovered.borrow_mut().replace(el.clone());
+        dispatch_pointer_event(el, "pointerenter", x, y, -1);
+        if let Ok(Some(btn)) = el.closest("button") {
+            dispatch_pointer_event(&btn, "pointerenter", x, y, -1);
+        }
+    }
+    dispatch_pointer_event(el, "pointermove", x, y, -1);
 }
 
 /// Let go of a gesture, or click what the virtual cursor is over.

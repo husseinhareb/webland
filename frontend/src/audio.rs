@@ -143,7 +143,12 @@ impl Player {
     /// is behind the picture. Seeking is audible, which is why it happens at
     /// half a second rather than at the first sample.
     fn catch_up(&self) {
-        let Ok(buffered) = self.element.buffered().end(0) else {
+        let ranges = self.element.buffered();
+        let count = ranges.length();
+        if count == 0 {
+            return;
+        }
+        let Ok(buffered) = ranges.end(count - 1) else {
             return;
         };
         if buffered - self.element.current_time() > MAX_LAG {

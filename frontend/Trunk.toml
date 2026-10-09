@@ -15,6 +15,10 @@ port = 3030
 # regardless. Same origin sidesteps both, and means a tunnel or reverse proxy
 # only has to forward one port.
 [[proxy]]
+backend = "http://127.0.0.1:9001/api"
+rewrite = "/api"
+
+[[proxy]]
 backend = "ws://127.0.0.1:9001"
 ws = true
 rewrite = "/ws"

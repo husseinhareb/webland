@@ -58,11 +58,13 @@ pub fn TitlebarMenu(
                                  on:pointerdown=move |e: PointerEvent| e.stop_propagation()>
                                 <button data-action="minimize"
                                         on:pointerdown=minimize>
-                                    "– Minimize"
+                                    <i class="fa-solid fa-minus"></i>
+                                    " Minimize"
                                 </button>
                                 <button data-action="maximize"
                                         on:pointerdown=maximize>
-                                    {if is_max { "❐ Restore" } else { "□ Maximize" }}
+                                    <i class=if is_max { "fa-regular fa-clone" } else { "fa-regular fa-square" }></i>
+                                    {if is_max { " Restore" } else { " Maximize" }}
                                 </button>
                                 <div class="menu-separator"></div>
                                 <div class="menu-section-label">"Workspace"</div>
@@ -84,7 +86,8 @@ pub fn TitlebarMenu(
                                 <div class="menu-separator"></div>
                                 <button class="menu-danger" data-action="close"
                                         on:pointerdown=close>
-                                    "× Close"
+                                    <i class="fa-solid fa-xmark"></i>
+                                    " Close"
                                 </button>
                             </div>
                         </div>

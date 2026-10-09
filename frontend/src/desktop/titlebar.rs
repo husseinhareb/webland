@@ -86,14 +86,24 @@ pub fn Titlebar(
                     view! {
                         <span class="lock-indicator"
                               title="Mouse captured (Click window to capture, ESC to release)">
-                            "🔒 Locked"
+                            <i class="fa-solid fa-lock"></i>
+                            " Locked"
                         </span>
                     }
                 })
             }}
-            <button class="minimize" on:pointerdown=minimize title="Minimize">"–"</button>
-            <button class="maximize" on:pointerdown=maximize title="Maximize">"□"</button>
-            <button class="close" on:pointerdown=close title="Close">"×"</button>
+            <button class="minimize" on:pointerdown=minimize title="Minimize">
+                <i class="fa-solid fa-minus"></i>
+            </button>
+            <button class="maximize" on:pointerdown=maximize title="Maximize">
+                <i class=move || {
+                    let is_max = scene.with_value(|s| s.is_snapped(id) || s.is_maximized(id));
+                    if is_max { "fa-regular fa-clone" } else { "fa-regular fa-square" }
+                }></i>
+            </button>
+            <button class="close" on:pointerdown=close title="Close">
+                <i class="fa-solid fa-xmark"></i>
+            </button>
         </div>
     }
 }

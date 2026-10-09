@@ -7,6 +7,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use webland_core::SurfaceId;
+use webland_protocol::Notification;
 
 use super::{Scene, SnapZone, Toast};
 
@@ -41,6 +42,9 @@ impl Scene {
                 window.minimized = minimized;
             }
         });
+        if !minimized {
+            self.presented(SurfaceId(id));
+        }
     }
 
     /// Send a window to the corner, or back where it came from.
@@ -183,7 +187,8 @@ impl Scene {
     /// `SurfaceCreated`.
     #[must_use]
     pub fn knows(&self, id: SurfaceId) -> bool {
-        self.windows.with_untracked(|ws| ws.iter().any(|w| w.id == id.0))
+        self.windows
+            .with_untracked(|ws| ws.iter().any(|w| w.id == id.0))
     }
 
     /// Whether a surface is currently visible on screen (not minimized and on the active workspace).
@@ -212,26 +217,72 @@ impl Scene {
 
     /// Push a system toast notification that auto-dismisses after 3.5 seconds.
     pub fn show_toast(&self, title: impl Into<String>, message: Option<String>) {
+        self.push_toast(
+            Toast {
+                title: title.into(),
+                message,
+                ..Toast::default()
+            },
+            Some(3500),
+        );
+    }
+
+    /// An application's notification, as a toast. Titled by its summary, or
+    /// by the application's name when it gave none.
+    pub fn notified(&self, notification: Notification) {
+        let settings = self.settings;
+        if settings.do_not_disturb.get_untracked() {
+            return;
+        }
+        let timeout_ms = match notification.expire_timeout {
+            0 => None,
+            ..0 => Some(settings.notification_seconds.get_untracked().max(1) * 1000),
+            ms => u32::try_from(ms).ok(),
+        };
+        let title = if notification.summary.is_empty() {
+            notification.app
+        } else {
+            notification.summary
+        };
+        self.push_toast(
+            Toast {
+                title,
+                message: Some(notification.body).filter(|body| !body.is_empty()),
+                icon: notification.icon,
+                notification: Some(notification.id),
+                ..Toast::default()
+            },
+            timeout_ms,
+        );
+    }
+
+    /// Push a toast, replacing any other for the same application
+    /// notification, and dismiss it after `timeout_ms` if there is one.
+    pub fn push_toast(&self, mut toast: Toast, timeout_ms: Option<u32>) {
         // Counted, not clocked. Two toasts raised in the same millisecond (
         // which is what a keyboard shortcut that raises two of them does) took
         // the same wall-clock id, and `<For>` keys by id: the second replaced
         // the first, and the first one's dismissal timer then took both.
         static NEXT_TOAST: AtomicU64 = AtomicU64::new(0);
         let id = NEXT_TOAST.fetch_add(1, Ordering::Relaxed);
-        let toast = Toast {
-            id,
-            title: title.into(),
-            message,
-        };
-        self.toasts.update(|ts| ts.push(toast));
+        toast.id = id;
+        let replaces = toast.notification;
+        self.toasts.update(|ts| {
+            if replaces.is_some() {
+                ts.retain(|t| t.notification != replaces);
+            }
+            ts.push(toast);
+        });
         let toasts = self.toasts;
-        if let Some(window) = web_sys::window() {
+        if let Some(timeout_ms) = timeout_ms
+            && let Some(window) = web_sys::window()
+        {
             let listener = Closure::<dyn FnMut()>::new(move || {
                 toasts.update(|ts| ts.retain(|t| t.id != id));
             });
             let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
                 listener.as_ref().unchecked_ref(),
-                3500,
+                i32::try_from(timeout_ms).unwrap_or(i32::MAX),
             );
             listener.forget();
         }

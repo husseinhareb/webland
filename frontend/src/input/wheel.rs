@@ -32,19 +32,25 @@ pub fn install(scene: &Scene, transport: &Rc<WebSocketTransport>) {
             if is_locked {
                 if let Some((cx, cy)) = scene.virtual_cursor.get_untracked()
                     && let Some(el) = doc.as_ref().and_then(|d| element_at(d, cx, cy))
-                    && let Ok(canvas) = el.dyn_into::<HtmlCanvasElement>()
-                    && let Some(id) = canvas_surface_id(&canvas)
                 {
-                    event.prevent_default();
-                    let (dx, dy) = wheel_pixels(&event);
-                    send(
-                        &transport,
-                        InputEvent::PointerScroll {
-                            id: SurfaceId(id),
-                            dx,
-                            dy,
-                        },
-                    );
+                    if let Some(canvas) = el.dyn_ref::<HtmlCanvasElement>()
+                        && let Some(id) = canvas_surface_id(canvas)
+                    {
+                        event.prevent_default();
+                        let (dx, dy) = wheel_pixels(&event);
+                        send(
+                            &transport,
+                            InputEvent::PointerScroll {
+                                id: SurfaceId(id),
+                                dx,
+                                dy,
+                            },
+                        );
+                    } else {
+                        event.prevent_default();
+                        let (dx, dy) = wheel_pixels(&event);
+                        scroll_dom(&el, dx, dy);
+                    }
                 }
                 return;
             }
@@ -96,4 +102,34 @@ fn wheel_pixels(event: &WheelEvent) -> (f64, f64) {
         _ => 1.0,
     };
     (event.delta_x() * scale, event.delta_y() * scale)
+}
+
+/// Scroll the nearest scrollable DOM ancestor under the pointer.
+fn scroll_dom(el: &web_sys::Element, dx: f64, dy: f64) {
+    let mut curr = Some(el.clone());
+    while let Some(node) = curr {
+        if node.id() == "webland-desktop" || node.tag_name().eq_ignore_ascii_case("BODY") {
+            break;
+        }
+        let can_scroll_y = node.scroll_height() > node.client_height();
+        let can_scroll_x = node.scroll_width() > node.client_width();
+        if (can_scroll_y && dy != 0.0) || (can_scroll_x && dx != 0.0) {
+            if let Some(window) = web_sys::window()
+                && let Ok(Some(style)) = window.get_computed_style(&node)
+            {
+                let overflow_y = style.get_property_value("overflow-y").unwrap_or_default();
+                let overflow_x = style.get_property_value("overflow-x").unwrap_or_default();
+                let allows_y = !matches!(overflow_y.as_str(), "hidden" | "visible" | "");
+                let allows_x = !matches!(overflow_x.as_str(), "hidden" | "visible" | "");
+                if (allows_y && dy != 0.0) || (allows_x && dx != 0.0) {
+                    node.scroll_by_with_x_and_y(dx, dy);
+                    return;
+                }
+            } else {
+                node.scroll_by_with_x_and_y(dx, dy);
+                return;
+            }
+        }
+        curr = node.parent_element();
+    }
 }

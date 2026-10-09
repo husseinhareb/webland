@@ -13,6 +13,7 @@ mod chrome;
 mod connect;
 mod drag;
 mod launcher;
+mod marquee;
 mod menu;
 mod overflow;
 mod panel;

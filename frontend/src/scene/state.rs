@@ -21,7 +21,7 @@ use crate::decode::Decoder;
 use super::remembered::{self, Placement};
 use crate::latency::Latency;
 
-use super::{ActiveResize, AltTabState, Grab, SnapZone, Toast, WindowState};
+use super::{ActiveResize, AltTabState, Grab, Settings, SnapZone, Toast, WindowState};
 
 /// Pixels each new window is offset from the last, so windows opening at the
 /// same size do not land exactly on top of each other.
@@ -126,6 +126,8 @@ pub struct Scene {
     pub alt_tab: RwSignal<Option<AltTabState>>,
     /// Active system toast notifications.
     pub toasts: RwSignal<Vec<Toast>>,
+    /// What the viewer chose in the settings panel.
+    pub settings: Settings,
     /// The active cursor icon shape (default, ns-resize, ew-resize, pointer, grab, etc.)
     pub cursor_icon: RwSignal<String>,
     /// The host's cursor theme, keyed by the same shape names: what the shell
@@ -199,6 +201,7 @@ impl Scene {
             snap_preview: RwSignal::new(None),
             alt_tab: RwSignal::new(None),
             toasts: RwSignal::new(Vec::new()),
+            settings: Settings::load(),
             cursor_icon: RwSignal::new(String::from("default")),
             cursors: RwSignal::new(Arc::default()),
             resizing: RwSignal::new(None),
@@ -274,20 +277,36 @@ impl Scene {
                         window.pointer_locked = locked;
                     }
                 });
+                // The game's lock is taken on its canvas and the user's own on
+                // the desktop, which is how the two are told apart: a game
+                // letting go (Minecraft's pause menu) gives the real pointer
+                // back, while a desktop the user captured stays captured and
+                // simply routes the motion to the game while it holds it.
+                let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+                    return;
+                };
+                let held = doc.pointer_lock_element();
                 if locked {
-                    if let Some(view) = self.views.borrow().get(&id.0) {
+                    if held.is_none()
+                        && let Some(view) = self.views.borrow().get(&id.0)
+                    {
                         view.canvas.request_pointer_lock();
                     }
-                } else if !self.captured.get()
-                    && let Some(doc) = web_sys::window().and_then(|w| w.document())
-                    && doc.pointer_lock_element().is_some()
-                {
+                } else if held.is_some_and(|el| el.is_instance_of::<HtmlCanvasElement>()) {
                     doc.exit_pointer_lock();
                 }
             }
             // Played by the page, handled before this (see `desktop::connect`):
             // no window owns it and nothing about it is drawn.
             ServerMessage::Audio { .. } => {}
+            ServerMessage::Wallpaper { url } => {
+                self.wallpaper.set(url);
+            }
+            ServerMessage::Notification(notification) => self.notified(notification),
+            ServerMessage::NotificationClosed { id } => {
+                self.toasts
+                    .update(|ts| ts.retain(|t| t.notification != Some(id)));
+            }
             ServerMessage::SurfaceDestroyed { id } => {
                 self.views.borrow_mut().remove(&id.0);
                 self.windows.update(|ws| ws.retain(|w| w.id != id.0));

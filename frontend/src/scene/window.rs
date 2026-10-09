@@ -14,11 +14,15 @@ pub struct AltTabState {
 }
 
 /// A desktop system toast notification.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Toast {
     pub id: u64,
     pub title: String,
     pub message: Option<String>,
+    pub icon: Option<String>,
+    /// The server's id when an application raised it, which is what a click
+    /// or a close is reported against.
+    pub notification: Option<u32>,
 }
 
 /// Everything about a window that the shell draws, and nothing the compositor

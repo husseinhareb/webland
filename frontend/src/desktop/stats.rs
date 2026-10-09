@@ -53,7 +53,12 @@ pub fn Stats(
         <span class="stats" title="Protocol traffic: down is frames, up is input">
             {move || {
                 let (down, up) = rates.get();
-                format!("↓ {} ↑ {}", rate(down), rate(up))
+                view! {
+                    <i class="fa-solid fa-arrow-down"></i>
+                    " " {rate(down)} " "
+                    <i class="fa-solid fa-arrow-up"></i>
+                    " " {rate(up)}
+                }
             }}
         </span>
     })

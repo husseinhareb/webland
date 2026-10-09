@@ -59,6 +59,9 @@ impl SurfaceRenderer {
             | ServerMessage::Cursors { .. }
             | ServerMessage::Clipboard { .. }
             | ServerMessage::PointerConstraint { .. }
+            | ServerMessage::Wallpaper { .. }
+            | ServerMessage::Notification(_)
+            | ServerMessage::NotificationClosed { .. }
             | ServerMessage::Applications(_) => {}
         }
     }

@@ -11,7 +11,7 @@ use webland_protocol::{ClientMessage, ServerMessage, decode, encode};
 
 use crate::latency::Latency;
 use crate::protocol::WebSocketTransport;
-use crate::scene::Scene;
+use crate::scene::{Scene, Settings};
 
 use super::shell::window_size;
 
@@ -42,6 +42,7 @@ pub fn connect(
     scene: Scene,
     latency: Rc<Latency>,
 ) -> Option<Rc<WebSocketTransport>> {
+    let settings = scene.settings;
     let backend = backend();
     let transport = if let Ok(transport) = WebSocketTransport::connect(&backend) {
         Rc::new(transport)
@@ -68,7 +69,10 @@ pub fn connect(
         // And that this keyboard holds nothing, which the seat cannot know:
         // it keeps whatever the last page left pressed.
         crate::input::release_modifiers(&opened);
+        // And which keyboard it is, if the viewer said.
+        send_keymap(&opened, settings, false);
     }));
+    follow_keymap(transport.clone(), settings);
 
     // Follow the window: the browser is the display, so its size is the screen
     // resolution and a resized window is a mode change.
@@ -179,4 +183,30 @@ pub fn connect(
     }));
 
     Some(transport)
+}
+
+/// A layout picked in the settings applies at once. The first run is the
+/// stored one, which the connection sends itself once it opens.
+fn follow_keymap(transport: Rc<WebSocketTransport>, settings: Settings) {
+    Effect::new(move |first: Option<()>| {
+        settings.layout.track();
+        settings.variant.track();
+        if first.is_some() {
+            send_keymap(&transport, settings, true);
+        }
+    });
+}
+
+/// Tell the compositor which xkb layout to read keys with. An empty one is
+/// only worth sending as a change back to the host's.
+fn send_keymap(transport: &WebSocketTransport, settings: Settings, changed: bool) {
+    if !changed && settings.layout.with_untracked(String::is_empty) {
+        return;
+    }
+    if let Ok(frame) = encode(&ClientMessage::SetKeymap {
+        layout: settings.layout.get_untracked().trim().to_owned(),
+        variant: settings.variant.get_untracked().trim().to_owned(),
+    }) {
+        transport.send(&frame);
+    }
 }

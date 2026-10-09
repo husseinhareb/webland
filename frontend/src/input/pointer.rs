@@ -17,7 +17,7 @@ use crate::latency::Latency;
 use crate::protocol::WebSocketTransport;
 use crate::scene::Scene;
 
-use super::dom::{canvas_surface_id, surface_position, target_canvas};
+use super::dom::{canvas_surface_id, dispatch_pointer_event, surface_position, target_canvas};
 use super::keymap::evdev_button;
 use super::locked;
 use super::wire::send;
@@ -37,6 +37,9 @@ pub type LastClick = Rc<RefCell<Option<ClickState>>>;
 /// that happened to end on a button.
 pub type Pressed = Rc<RefCell<Option<Element>>>;
 
+/// What element is currently hovered by the virtual cursor in pointer-locked mode.
+pub type Hovered = Rc<RefCell<Option<Element>>>;
+
 /// Attach the motion, context-menu and button listeners.
 pub fn install(
     container: &Element,
@@ -46,15 +49,35 @@ pub fn install(
 ) {
     let last_click: LastClick = Rc::new(RefCell::new(None));
     let pressed: Pressed = Rc::new(RefCell::new(None));
+    let hovered: Hovered = Rc::new(RefCell::new(None));
 
     {
         let transport = transport.clone();
         let scene = scene.clone();
+        let hovered = hovered.clone();
         on_document("mousemove", move |event: &MouseEvent| {
             let doc = document();
             if let Some(doc) = locked_document(doc.as_ref()) {
-                locked::motion(&scene, &transport, Some(doc), event);
+                locked::motion(&scene, &transport, Some(doc), event, &hovered);
                 return;
+            }
+            if let Some(prev) = hovered.borrow_mut().take() {
+                dispatch_pointer_event(
+                    &prev,
+                    "pointerleave",
+                    event.client_x(),
+                    event.client_y(),
+                    -1,
+                );
+                if let Ok(Some(btn)) = prev.closest("button") {
+                    dispatch_pointer_event(
+                        &btn,
+                        "pointerleave",
+                        event.client_x(),
+                        event.client_y(),
+                        -1,
+                    );
+                }
             }
             scene
                 .virtual_cursor

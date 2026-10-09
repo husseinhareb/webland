@@ -164,7 +164,7 @@ fn Rows(
                 return view! {
                     <div class="systray-row submenu">
                         <span class="systray-label">{label}</span>
-                        <span class="systray-arrow">"›"</span>
+                        <span class="systray-arrow"><i class="fa-solid fa-chevron-right"></i></span>
                         <div class="systray-menu nested" data-row=id>
                             <Rows id=String::new() rows=children scene=scene transport=transport />
                         </div>
@@ -175,7 +175,9 @@ fn Rows(
             view! {
                 <button class="systray-row" class:disabled=!enabled on:pointerdown=click>
                     <span class="systray-tick">
-                        {row.checked.map_or(" ", |checked| if checked { "✓" } else { " " })}
+                        {row.checked.and_then(|checked| {
+                            checked.then(|| view! { <i class="fa-solid fa-check"></i> })
+                        })}
                     </span>
                     <span class="systray-label">{label}</span>
                 </button>

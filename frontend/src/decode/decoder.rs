@@ -1,4 +1,5 @@
 //! The `WebCodecs` decoder itself.
+#![allow(unsafe_code)]
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -153,7 +154,8 @@ impl Decoder {
         // a fiction anyway.
         let timestamp = self.timestamp.get();
         self.timestamp.set(timestamp.wrapping_add(1000));
-        let init = EncodedVideoChunkInit::new(&js_sys::Uint8Array::from(payload), timestamp, kind);
+        let array_view = unsafe { js_sys::Uint8Array::view(payload) };
+        let init = EncodedVideoChunkInit::new(&array_view, timestamp, kind);
         init.set_duration(1000);
         let Ok(chunk) = EncodedVideoChunk::new(&init) else {
             return false;

@@ -60,7 +60,7 @@ pub fn AltTabModal(
                                             class:selected=is_selected
                                             on:pointerdown=move |_| select_and_commit(item_id)
                                         >
-                                            <span class="alt-tab-icon">"🗖"</span>
+                                            <span class="alt-tab-icon"><i class="fa-regular fa-window-maximize"></i></span>
                                             <span class="alt-tab-title">{item_title}</span>
                                         </button>
                                     }
@@ -75,22 +75,56 @@ pub fn AltTabModal(
 }
 
 /// Floating system notifications in the top-right corner.
+///
+/// An application's notification is clickable: the click is its default
+/// action, and both a click and the close button are reported back, so every
+/// other browser drops it too and the application hears what happened.
 #[component]
-pub fn ToastContainer(scene: StoredValue<Scene, LocalStorage>) -> impl IntoView {
+pub fn ToastContainer(
+    scene: StoredValue<Scene, LocalStorage>,
+    transport: StoredValue<Option<Rc<WebSocketTransport>>, LocalStorage>,
+) -> impl IntoView {
     let toasts = scene.with_value(|s| s.toasts);
-    let dismiss = move |id: u64| {
+    let close = move |id: u64, notification: Option<u32>, activated: bool| {
         toasts.update(|ts| ts.retain(|t| t.id != id));
+        if let Some(notification) = notification
+            && let Some(transport) = transport.get_value()
+            && let Ok(frame) = encode(&ClientMessage::NotificationClose {
+                id: notification,
+                activated,
+            })
+        {
+            transport.send(&frame);
+        }
     };
 
     view! {
         <div class="toast-container">
             <For each=move || toasts.get() key=|t| t.id let:toast>
-                <div class="toast">
+                <div
+                    class="toast"
+                    class:clickable=toast.notification.is_some()
+                    on:pointerdown=move |_| {
+                        if toast.notification.is_some() {
+                            close(toast.id, toast.notification, true);
+                        }
+                    }
+                >
+                    {toast.icon.clone().map(|src| view! { <img class="toast-icon" src=src alt="" /> })}
                     <div class="toast-body">
                         <div class="toast-title">{toast.title.clone()}</div>
                         {toast.message.clone().map(|msg| view! { <div class="toast-message">{msg}</div> })}
                     </div>
-                    <button class="toast-close" on:pointerdown=move |_| dismiss(toast.id)>"×"</button>
+                    <button
+                        class="toast-close"
+                        on:pointerdown=move |e: web_sys::PointerEvent| {
+                            // Not a click on the notification itself.
+                            e.stop_propagation();
+                            close(toast.id, toast.notification, false);
+                        }
+                    >
+                        <i class="fa-solid fa-xmark"></i>
+                    </button>
                 </div>
             </For>
         </div>

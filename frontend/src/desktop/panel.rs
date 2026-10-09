@@ -33,6 +33,7 @@ pub fn Panel(
 ) -> impl IntoView {
     let current = scene.with_value(|scene| scene.workspace);
     let open = scene.with_value(|scene| scene.launcher_open);
+    let settings = scene.with_value(|scene| scene.settings);
     let clock = RwSignal::new(now());
     // A minute is the resolution shown, so that is the resolution ticked.
     {
@@ -62,6 +63,8 @@ pub fn Panel(
             <button
                 class="launch"
                 class:active=move || open.get()
+                title="Applications"
+                aria-label="Applications"
                 on:pointerdown=move |e: web_sys::PointerEvent| {
                     e.prevent_default();
                     open.update(|open| *open = !*open);
@@ -70,7 +73,7 @@ pub fn Panel(
                     e.prevent_default();
                 }
             >
-                "Apps"
+                <i class="fa-solid fa-grip"></i>
             </button>
             <Launcher open=open scene=scene transport=transport />
             <div class="workspaces">
@@ -88,15 +91,28 @@ pub fn Panel(
             </div>
             <Tasks scene=scene transport=transport />
             <SystemTray scene=scene transport=transport />
-            <Stats transport=transport />
+            // Hidden, not unmounted: the stats keep an interval of their own.
+            <span style:display=move || if settings.show_stats.get() { "" } else { "none" }>
+                <Stats transport=transport />
+            </span>
             <Overflow scene=scene />
-            <span class="clock">{move || clock.get()}</span>
+            <span class="clock">
+                {move || {
+                    let (hours, minutes) = clock.get();
+                    if settings.clock_24h.get() {
+                        format!("{hours:02}:{minutes:02}")
+                    } else {
+                        let suffix = if hours < 12 { "AM" } else { "PM" };
+                        format!("{}:{minutes:02} {suffix}", (hours + 11) % 12 + 1)
+                    }
+                }}
+            </span>
         </footer>
     }
 }
 
-/// Wall clock as `HH:MM`, for the panel.
-fn now() -> String {
+/// Wall clock as hours and minutes, for the panel.
+fn now() -> (u32, u32) {
     let date = js_sys::Date::new_0();
-    format!("{:02}:{:02}", date.get_hours(), date.get_minutes())
+    (date.get_hours(), date.get_minutes())
 }
