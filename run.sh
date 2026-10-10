@@ -40,7 +40,7 @@ build_release() {
 
 run_release() {
   echo "frontend http://127.0.0.1:$PORT   backend $WEBLAND_WS"
-  trap 'kill 0' EXIT INT TERM
+  trap 'trap - EXIT INT TERM; kill 0' EXIT INT TERM
   "$SERVER_BIN" "$@" &
   (cd frontend && trunk serve --release --no-autoreload --color always --port "$PORT" 2>&1 | strip_emoji) &
   wait -n
@@ -48,7 +48,7 @@ run_release() {
 
 case "$cmd" in
   dev)
-    trap 'kill 0' EXIT INT TERM
+    trap 'trap - EXIT INT TERM; kill 0' EXIT INT TERM
     cargo run --manifest-path backend/Cargo.toml -p webland-server -- "$@" &
     (cd frontend && trunk serve --color always --port "$PORT" 2>&1 | strip_emoji) &
     wait
