@@ -357,11 +357,13 @@ async fn serve_connection(
 /// `sink`, and everything it sends back, input, and the frame acks that pace
 /// `wl_surface.frame` (Decision 3), is forwarded to the compositor on `client`.
 /// Enabled via the `WEBLAND_WS` env var so it never interferes with the window.
+/// Every request has to carry `token` (see [`crate::auth`]).
 pub fn spawn_server(
     addr: SocketAddr,
     sink: FrameSink,
     client: mpsc::UnboundedSender<ClientMessage>,
     bus: Option<String>,
+    token: String,
 ) {
     let spawned = std::thread::Builder::new()
         .name("webland-ws".to_owned())
@@ -416,6 +418,11 @@ pub fn spawn_server(
                             .delete(crate::wallpaper::delete_wallpaper),
                     )
                     .layer(DefaultBodyLimit::max(30 * 1024 * 1024))
+                    // Outermost, so nothing is reached without the token.
+                    .layer(axum::middleware::from_fn_with_state(
+                        std::sync::Arc::<str>::from(token),
+                        crate::auth::require,
+                    ))
                     .with_state(state);
 
                 let make_service = app.into_make_service_with_connect_info::<SocketAddr>();
@@ -501,7 +508,7 @@ mod tests {
         let (client_tx, _client_rx) = mpsc::unbounded_channel();
         // No bus: this test is about the socket, and a tray would only put a
         // watcher on somebody else's session.
-        spawn_server(addr, FrameSink::new(), client_tx, None);
+        spawn_server(addr, FrameSink::new(), client_tx, None, String::from("t"));
 
         // The server binds on a thread of its own; wait for the port to answer.
         let silent = loop {
@@ -513,7 +520,7 @@ mod tests {
 
         let connected = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            tokio_tungstenite::connect_async(format!("ws://{addr}")),
+            tokio_tungstenite::connect_async(browser(addr, Some("t"))),
         )
         .await;
         assert!(
@@ -521,6 +528,59 @@ mod tests {
             "a browser could not connect behind a peer that never handshakes"
         );
         drop(silent);
+    }
+
+    /// A socket upgrade without the token, or with the wrong one, is refused:
+    /// this is what stops any page on any site from opening the desktop.
+    #[tokio::test]
+    async fn the_socket_is_refused_without_the_token() {
+        let addr = {
+            let scratch = bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+            scratch.local_addr().unwrap()
+        };
+        let (client_tx, _client_rx) = mpsc::unbounded_channel();
+        spawn_server(
+            addr,
+            FrameSink::new(),
+            client_tx,
+            None,
+            String::from("right"),
+        );
+        while tokio::net::TcpStream::connect(addr).await.is_err() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        for cookie in [None, Some("wrong"), Some("righ"), Some("rightt")] {
+            assert!(
+                tokio_tungstenite::connect_async(browser(addr, cookie))
+                    .await
+                    .is_err(),
+                "connected with cookie {cookie:?}"
+            );
+        }
+        assert!(
+            tokio_tungstenite::connect_async(browser(addr, Some("right")))
+                .await
+                .is_ok()
+        );
+    }
+
+    /// A socket request as the browser makes it, with the token cookie if given.
+    fn browser(
+        addr: std::net::SocketAddr,
+        token: Option<&str>,
+    ) -> tokio_tungstenite::tungstenite::handshake::client::Request {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut request = format!("ws://{addr}/ws").into_client_request().unwrap();
+        if let Some(token) = token {
+            request.headers_mut().insert(
+                "cookie",
+                format!("other=1; {}={token}", crate::auth::COOKIE_NAME)
+                    .parse()
+                    .unwrap(),
+            );
+        }
+        request
     }
 
     #[tokio::test]

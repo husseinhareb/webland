@@ -36,8 +36,11 @@ The chevron at the end of the panel holds the viewer's settings: wallpaper,
 clock format, network stats, do-not-disturb, and the keyboard layout, which is
 the viewer's keyboard rather than the host's and is applied live.
 
-Not there yet: HiDPI output scaling, and authentication. The protocol has no auth at all, so bind it to localhost and put
-a proxy in front if you want it elsewhere. [docs/roadmap.md](docs/roadmap.md)
+Every request needs the session token, kept in `$XDG_CONFIG_HOME/webland/token`
+(delete it to revoke; the next start makes a new one). The traffic is plain
+HTTP, so anywhere beyond localhost put a TLS proxy in front.
+
+Not there yet: HiDPI output scaling. [docs/roadmap.md](docs/roadmap.md)
 has the order of work, [docs/architecture.md](docs/architecture.md) the shape of
 the code.
 
@@ -73,9 +76,10 @@ rustup target add wasm32-unknown-unknown && cargo install trunk
 ./run.sh check      # fmt, clippy and tests for both halves, plus a wasm build
 ```
 
-Then open http://127.0.0.1:3030. The page serves the protocol socket from its
-own origin at `/ws`, proxied to the backend, so only one port ever has to be
-reachable.
+Then open the `http://127.0.0.1:3030/#token=...` link the server logs; the
+page keeps the token as a cookie, so later visits need only the plain URL. The
+page serves the protocol socket from its own origin at `/ws`, proxied to the
+backend, so only one port ever has to be reachable.
 
 The compositor binds its own `wayland-N` socket and logs the name. Point a
 client at it, or have it spawn one:

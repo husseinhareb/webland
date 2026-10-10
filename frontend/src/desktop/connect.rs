@@ -19,6 +19,61 @@ use super::shell::window_size;
 /// serving the page (see `Trunk.toml`).
 const BACKEND_PATH: &str = "/ws";
 
+/// Also what a refused token looks like: the browser reports a failed upgrade
+/// as a close, with no status to tell the two apart.
+const DISCONNECTED: &str =
+    "disconnected; is the backend running? A first visit needs the #token= link it logs.";
+
+/// The cookie the backend checks every request for (its `auth` module).
+const TOKEN_COOKIE: &str = "webland_token";
+
+/// Take the session token from `#token=` in the page's URL, if it is there.
+///
+/// Kept as a cookie because a cookie is the one credential the browser attaches
+/// to everything by itself: the socket upgrade, `fetch`, and the wallpaper as
+/// an image. `SameSite=Strict` stops another site from having it attached on
+/// its behalf. The fragment is then wiped from the address bar, so the token is
+/// not left on screen.
+pub fn adopt_token() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let location = window.location();
+    let Some(token) = location
+        .hash()
+        .ok()
+        .and_then(|hash| hash.strip_prefix("#token=").map(str::to_owned))
+    else {
+        return;
+    };
+    // The server makes hex; anything else is not a token, and could smuggle
+    // attributes into the cookie.
+    if token.is_empty() || !token.chars().all(|c| c.is_ascii_hexdigit()) {
+        return;
+    }
+    let secure = if location.protocol().is_ok_and(|scheme| scheme == "https:") {
+        "; Secure"
+    } else {
+        ""
+    };
+    if let Some(document) = window
+        .document()
+        .and_then(|document| document.dyn_into::<web_sys::HtmlDocument>().ok())
+    {
+        let _ = document.set_cookie(&format!(
+            "{TOKEN_COOKIE}={token}; Path=/; Max-Age=31536000; SameSite=Strict{secure}"
+        ));
+    }
+    let clean = format!(
+        "{}{}",
+        location.pathname().unwrap_or_default(),
+        location.search().unwrap_or_default()
+    );
+    if let Ok(history) = window.history() {
+        let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&clean));
+    }
+}
+
 /// The protocol socket's URL, on the same origin as the page.
 ///
 /// Derived rather than hardcoded so the page works wherever it is served from:
@@ -92,7 +147,7 @@ pub fn connect(
         listener.forget();
     }
     transport.on_close(Box::new(move || {
-        status.set(String::from("disconnected; is the backend running?"));
+        status.set(String::from(DISCONNECTED));
     }));
 
     // Acks are sent when the scene says a frame is on screen, not when one

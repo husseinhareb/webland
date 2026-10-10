@@ -47,6 +47,7 @@ features = [
     "MediaSource", "SourceBuffer", "SourceBufferList", "HtmlAudioElement", "HtmlMediaElement", "TimeRanges", "Url",
     "EncodedVideoChunk", "EncodedVideoChunkInit", "EncodedVideoChunkType",
     "Request", "RequestInit", "Response", "Headers",
+    "HtmlDocument", "History",
     "console",
 ]
 

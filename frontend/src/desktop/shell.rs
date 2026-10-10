@@ -15,7 +15,7 @@ use crate::latency::Latency;
 use crate::scene::{CursorArt, Scene, SnapZone, pixel_ratio, pixels, whole_blocks};
 
 use super::chrome::{AltTabModal, ToastContainer};
-use super::connect::connect;
+use super::connect::{adopt_token, connect};
 use super::panel::Panel;
 use super::window::Window;
 use super::{capture, drag, marquee, wallpaper};
@@ -52,6 +52,8 @@ pub fn Desktop() -> impl IntoView {
     let status = RwSignal::new(String::from("connecting…"));
     let latency = Rc::new(Latency::new());
     let scene = Scene::new(latency.clone());
+    // Before the socket opens: the upgrade is the first request that needs it.
+    adopt_token();
     let transport = connect(status, scene.clone(), latency.clone());
 
     let windows = scene.windows;

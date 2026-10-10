@@ -123,6 +123,9 @@ use smithay::wayland::pointer_constraints::{
 };
 use smithay::wayland::relative_pointer::RelativePointerManagerState;
 use smithay::reexports::calloop::EventLoop;
+use smithay::reexports::calloop::generic::Generic;
+use smithay::reexports::calloop::{Interest, Mode as Trigger, PostAction};
+pub use smithay::reexports::calloop::ping::{PingSource, make_ping};
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::xwayland_shell::XWaylandShellState;
 use smithay::xwayland::{X11Surface, X11Wm, XWaylandClientData};
@@ -2181,16 +2184,6 @@ fn stream_dirty(
         let announced = keyframe || resized || moved;
         if announced {
             tracked.size = Some(size);
-            // Temporary: the streamed image against the window the client says
-            // it drew. A wider image is the client's shadow margin, which is
-            // transparent to the client and black once encoded.
-            tracing::debug!(
-                id = tracked.id.0,
-                image = ?(size.width, size.height),
-                content = ?content_rect(surface, size),
-                decorated = !decorates_itself,
-                "surface announced"
-            );
             emit(ServerMessage::SurfaceCreated(SurfaceCreated {
                 id: tracked.id,
                 size,
@@ -2642,16 +2635,37 @@ pub fn run_winit(
 pub fn run_headless(
     on_frame: Option<Box<dyn Fn(ServerMessage)>>,
     mut poll_client: Option<Box<dyn FnMut() -> Option<ClientMessage>>>,
+    // Pinged whenever `poll_client` has something, so input is handled the
+    // moment it arrives rather than at the next tick.
+    wake: Option<PingSource>,
     bus: Option<&spawn::Bus>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut display: Display<Webland> = Display::new()?;
     let dh = display.handle();
-    // An event loop only for XWayland: smithay hands its X server and window
-    // manager over as calloop sources, and the compositor's own loop is a plain
-    // one. Pumped with a zero timeout each pass rather than run, so the shape of
-    // the main loop stays what it was.
+    // XWayland's X server and window manager arrive as calloop sources, so they
+    // live here, along with what the loop waits on between passes. Pumped each
+    // pass rather than run, so the shape of the main loop stays what it was.
     let mut event_loop: EventLoop<'static, Webland> = EventLoop::try_new()?;
     let xwayland_starting = xwayland::start(&event_loop.handle(), &dh);
+    // The loop waits on these instead of sleeping: browser input, and any
+    // client request (a commit is one), each end the wait as they arrive.
+    if let Some(wake) = wake {
+        event_loop
+            .handle()
+            .insert_source(wake, |(), (), _| {})
+            .map_err(|err| err.error)?;
+    }
+    event_loop
+        .handle()
+        .insert_source(
+            Generic::new(
+                display.backend().poll_fd().try_clone_to_owned()?,
+                Interest::READ,
+                Trigger::Level,
+            ),
+            |_, _, _| Ok(PostAction::Continue),
+        )
+        .map_err(|err| err.error)?;
 
     let compositor_state = CompositorState::new::<Webland>(&dh);
     let shm_state = ShmState::new::<Webland>(&dh, vec![]);
@@ -2786,8 +2800,8 @@ pub fn run_headless(
     let start_time = std::time::Instant::now();
     let mut known: HashMap<ObjectId, Tracked> = HashMap::new();
     let mut next_surface_id: u64 = 0;
+    let mut next_tick = std::time::Instant::now();
     loop {
-        let pass_started = std::time::Instant::now();
         if let Some(stream) = listener.accept()? {
             // The handle is dropped: the display owns the connection, and the
             // `Vec` these used to be pushed into only ever grew, one entry per
@@ -2799,10 +2813,17 @@ pub fn run_headless(
         display.dispatch_clients(&mut state)?;
         event_loop.dispatch(Some(std::time::Duration::ZERO), &mut state)?;
 
-        // An application installed or removed since the last pass: the browser
-        // holds the listing, so it has to be told the new one.
-        if applications.refresh() {
-            state.announce_applications = true;
+        // Paced work, once a frame however often the loop wakes: frame callbacks
+        // (a client woken by each ack would outrun 60Hz) and the application
+        // scan, which stats directories.
+        let tick = std::time::Instant::now() >= next_tick;
+        if tick {
+            next_tick = std::time::Instant::now() + FRAME_INTERVAL;
+            // An application installed or removed since the last pass: the
+            // browser holds the listing, so it has to be told the new one.
+            if applications.refresh() {
+                state.announce_applications = true;
+            }
         }
 
         drain_client(
@@ -2825,16 +2846,18 @@ pub fn run_headless(
             &mut known,
             &mut next_surface_id,
         );
-        tick_frame_callbacks(&state, &mut known, start_time);
+        if tick {
+            tick_frame_callbacks(&state, &mut known, start_time);
+        }
 
         display.flush_clients()?;
-        // Sleep out what is left of the frame, not a whole frame on top of it.
-        // A flat 16ms made the pass cost 16ms *plus* dispatch, capture, encode
-        // and transport, so the desktop never reached 60Hz and every keystroke
-        // waited on a sleep that had nothing to do with it.
-        if let Some(rest) = FRAME_INTERVAL.checked_sub(pass_started.elapsed()) {
-            std::thread::sleep(rest);
-        }
+        // Wait for input, a client request or the next tick, whichever is
+        // first. Sleeping out the tick instead cost a keystroke up to a frame
+        // to be read and another for the client's redraw to be captured.
+        event_loop.dispatch(
+            Some(next_tick.saturating_duration_since(std::time::Instant::now())),
+            &mut state,
+        )?;
     }
 }
 
