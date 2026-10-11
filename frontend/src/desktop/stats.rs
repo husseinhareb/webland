@@ -28,16 +28,27 @@ pub fn Stats(
     let rates = RwSignal::new((0.0, 0.0));
     let traffic = transport.with_value(|t| t.as_ref().map(|t| t.traffic()))?;
 
-    let mut last = traffic.totals();
+    let clock = || {
+        web_sys::window()
+            .and_then(|window| window.performance())
+            .map_or(0.0, |performance| performance.now())
+    };
+    let mut last = (traffic.totals(), clock());
     let tick = Closure::<dyn FnMut()>::new(move || {
-        let now = traffic.totals();
-        let seconds = f64::from(INTERVAL_MS) / 1000.0;
+        let now = (traffic.totals(), clock());
+        // Measured, not assumed: a hidden tab's timers are throttled to as
+        // little as once a minute, and a minute's bytes over one second read
+        // as sixty times the rate.
+        let seconds = (now.1 - last.1) / 1000.0;
+        if seconds <= 0.0 {
+            return;
+        }
         // Saturating, because the totals are `u64`: subtracting them the wrong
         // way round is not a small negative number, it is an enormous positive
         // one, and the panel would report gigabytes a second.
         rates.set((
-            bytes_per_second(now.0.saturating_sub(last.0), seconds),
-            bytes_per_second(now.1.saturating_sub(last.1), seconds),
+            bytes_per_second(now.0.0.saturating_sub(last.0.0), seconds),
+            bytes_per_second(now.0.1.saturating_sub(last.0.1), seconds),
         ));
         last = now;
     });
