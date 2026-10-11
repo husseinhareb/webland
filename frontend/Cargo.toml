@@ -6,7 +6,7 @@
 name = "webland-frontend"
 version = "0.0.0"
 edition = "2024"
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/husseinhareb/webland"
 publish = false
 
