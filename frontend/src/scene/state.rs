@@ -12,7 +12,7 @@ use web_sys::HtmlCanvasElement;
 use webland_core::SurfaceId;
 use webland_protocol::{
     Application, Codec, CursorShape, ServerMessage, SurfaceCreated, SurfaceFrame, TrayItem,
-    TrayMenuItem, WindowRequest,
+    TrayMenuItem, UNSCALED, WindowRequest,
 };
 
 use crate::compositor::SurfaceRenderer;
@@ -444,6 +444,10 @@ impl Scene {
     fn opened(&self, created: SurfaceCreated) {
         let id = created.id.0;
         let (width, height) = (created.size.width, created.size.height);
+        // The window's box is in device pixels and the content rectangle in
+        // the image's, which differ for a client that drew at 1x on a denser
+        // screen: its box is that much bigger than its pixels.
+        let shown = |pixels: u32| pixels * created.scale / UNSCALED;
         if self.windows.with(|ws| ws.iter().any(|w| w.id == id)) {
             // A resize, not a new window: the canvas follows the
             // surface, and this is the only moment its bitmap should be
@@ -456,8 +460,8 @@ impl Scene {
                     // A menu that was repositioned is announced again
                     // at the same size, and hangs somewhere new.
                     window.parent = created.parent;
-                    window.width = created.content.width;
-                    window.height = created.content.height;
+                    window.width = shown(created.content.width);
+                    window.height = shown(created.content.height);
                     // Re-sent with every announce, and worth taking: a
                     // client that bound the decoration protocol late
                     // would otherwise keep the chrome it opened with.
@@ -493,8 +497,8 @@ impl Scene {
         self.windows.update(|ws| {
             ws.push(WindowState {
                 id,
-                width: created.content.width,
-                height: created.content.height,
+                width: shown(created.content.width),
+                height: shown(created.content.height),
                 image: (width, height),
                 content: created.content,
                 title: String::from("…"),

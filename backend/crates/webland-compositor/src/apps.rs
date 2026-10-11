@@ -132,8 +132,8 @@ impl Applications {
         if !home.is_empty() {
             launcher.current_dir(&home);
         }
-        match launcher.spawn() {
-            Ok(_) => tracing::info!(?argv, "launched"),
+        match crate::spawn::start(&mut launcher) {
+            Ok(()) => tracing::info!(?argv, "launched"),
             Err(err) => tracing::warn!(?argv, %err, "could not launch"),
         }
     }

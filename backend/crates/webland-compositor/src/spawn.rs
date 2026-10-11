@@ -101,6 +101,24 @@ impl Env {
     }
 }
 
+/// Start a child of the session, and reap it when it exits.
+///
+/// Nothing else waits on what the session launches, and a child nobody waits
+/// on stays in the process table once it has exited: one more for every
+/// application closed, for as long as the server runs.
+///
+/// # Errors
+/// When the program cannot be started.
+pub fn start(command: &mut Command) -> std::io::Result<()> {
+    let mut child = command.spawn()?;
+    std::thread::Builder::new()
+        .name("webland-reap".to_owned())
+        .spawn(move || {
+            let _ = child.wait();
+        })?;
+    Ok(())
+}
+
 impl Bus {
     /// Where to reach this bus: what children are told, and what the tray
     /// watches.
@@ -151,6 +169,32 @@ impl Drop for Bus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Children of this process that have exited and not been waited on.
+    fn zombies() -> usize {
+        let ours = std::process::id().to_string();
+        std::fs::read_dir("/proc")
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| std::fs::read_to_string(entry.ok()?.path().join("stat")).ok())
+            .filter(|stat| {
+                // After the command name, which may itself hold spaces: state, then parent.
+                let mut fields = stat
+                    .rsplit_once(") ")
+                    .map_or("", |(_, rest)| rest)
+                    .split(' ');
+                fields.next() == Some("Z") && fields.next() == Some(ours.as_str())
+            })
+            .count()
+    }
+
+    #[test]
+    fn started_children_are_reaped() {
+        start(&mut Command::new("true")).unwrap();
+        // Long enough for `true` to have exited; a zombie would stay for good.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(zombies(), 0);
+    }
 
     /// What a child is told, as `Command` records it: `Some` sets, `None`
     /// removes.

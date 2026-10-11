@@ -184,7 +184,18 @@ pub struct SurfaceCreated {
     /// let the compositor answer, so the shell drawing a titlebar of its own
     /// would put a second one directly above the client's.
     pub decorated: bool,
+    /// Device pixels per image pixel, in 120ths (the unit `wp_fractional_scale`
+    /// counts in).
+    ///
+    /// 120 for a client that drew at the screen's density, which is every one
+    /// that honours the scale it is told. An older client, and every X one,
+    /// draws at 1x whatever it is told, and the browser enlarges it rather than
+    /// show it at a fraction of its size.
+    pub scale: u32,
 }
+
+/// [`SurfaceCreated::scale`] for a surface drawn at the screen's density.
+pub const UNSCALED: u32 = 120;
 
 /// A window-management gesture that began inside the client, not the shell.
 ///
@@ -466,7 +477,11 @@ pub enum ClientMessage {
     /// the window it is actually displayed in; too small, and then upscaled by
     /// the browser, which is what makes it look soft. The browser is the display
     /// here, so the browser is what knows the answer.
-    Resize { size: Size },
+    ///
+    /// `scale` is the browser's `devicePixelRatio`: clients are told it, and
+    /// configured at `size` divided by it, so they draw their interface at a
+    /// readable size and their pixels at the screen's density.
+    Resize { size: Size, scale: f64 },
     /// Send full contents for every surface on the next frame.
     ///
     /// Frames carry only damaged regions, so a browser joining mid-stream has
@@ -481,6 +496,13 @@ pub enum ClientMessage {
     /// Interpret keys with this xkb layout and variant, the viewer's keyboard
     /// rather than the host's. An empty layout goes back to the host's.
     SetKeymap { layout: String, variant: String },
+    /// The browser's display refresh, in millihertz as `wl_output` counts it.
+    ///
+    /// Frame callbacks are paced to it. A client drawing faster than the screen
+    /// shows spends frames nobody sees and judders where two land on one
+    /// refresh; slower caps a 144 Hz screen at 60. Only the browser can measure
+    /// its screen.
+    RefreshRate { millihertz: u32 },
 }
 
 #[cfg(test)]
@@ -510,6 +532,7 @@ mod tests {
             },
             parent: None,
             decorated: true,
+            scale: 120,
         });
         let frame = encode(&msg).unwrap();
         assert_eq!(msg, decode::<ServerMessage>(&frame).unwrap());

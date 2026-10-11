@@ -11,7 +11,7 @@ use webland_protocol::{ClientMessage, ServerMessage, decode, encode};
 
 use crate::latency::Latency;
 use crate::protocol::WebSocketTransport;
-use crate::scene::{Scene, Settings};
+use crate::scene::{Scene, Settings, pixel_ratio};
 
 use super::shell::window_size;
 
@@ -114,7 +114,10 @@ pub fn connect(
         // Say how big the display is before asking for anything to put on it,
         // so the first frame arrives at the right size rather than at a guess.
         if let Some(size) = window_size()
-            && let Ok(frame) = encode(&ClientMessage::Resize { size })
+            && let Ok(frame) = encode(&ClientMessage::Resize {
+                size,
+                scale: pixel_ratio(),
+            })
         {
             opened.send(&frame);
         }
@@ -126,26 +129,10 @@ pub fn connect(
         crate::input::release_modifiers(&opened);
         // And which keyboard it is, if the viewer said.
         send_keymap(&opened, settings, false);
+        measure_refresh(opened.clone(), Vec::new());
     }));
     follow_keymap(transport.clone(), settings);
-
-    // Follow the window: the browser is the display, so its size is the screen
-    // resolution and a resized window is a mode change.
-    {
-        let resizing = transport.clone();
-        let listener = Closure::<dyn FnMut()>::new(move || {
-            if let Some(size) = window_size()
-                && let Ok(frame) = encode(&ClientMessage::Resize { size })
-            {
-                resizing.send(&frame);
-            }
-        });
-        if let Some(window) = web_sys::window() {
-            let _ = window
-                .add_event_listener_with_callback("resize", listener.as_ref().unchecked_ref());
-        }
-        listener.forget();
-    }
+    follow_window(transport.clone());
     transport.on_close(Box::new(move || {
         status.set(String::from(DISCONNECTED));
     }));
@@ -240,6 +227,26 @@ pub fn connect(
     Some(transport)
 }
 
+/// Follow the window: the browser is the display, so its size is the screen
+/// resolution and a resized window is a mode change.
+fn follow_window(transport: Rc<WebSocketTransport>) {
+    let listener = Closure::<dyn FnMut()>::new(move || {
+        if let Some(size) = window_size()
+            && let Ok(frame) = encode(&ClientMessage::Resize {
+                size,
+                scale: pixel_ratio(),
+            })
+        {
+            transport.send(&frame);
+        }
+    });
+    if let Some(window) = web_sys::window() {
+        let _ =
+            window.add_event_listener_with_callback("resize", listener.as_ref().unchecked_ref());
+    }
+    listener.forget();
+}
+
 /// A layout picked in the settings applies at once. The first run is the
 /// stored one, which the connection sends itself once it opens.
 fn follow_keymap(transport: Rc<WebSocketTransport>, settings: Settings) {
@@ -248,6 +255,50 @@ fn follow_keymap(transport: Rc<WebSocketTransport>, settings: Settings) {
         settings.variant.track();
         if first.is_some() {
             send_keymap(&transport, settings, true);
+        }
+    });
+}
+
+/// Animation frames timed to measure the display's refresh: two seconds at
+/// 60 Hz.
+const REFRESH_SAMPLES: usize = 120;
+
+/// Time animation frames and tell the compositor the display's refresh, which
+/// it paces frame callbacks to.
+///
+/// A hidden page gets no animation frames, so a tab opened in the background
+/// measures once it is first shown, and the compositor assumes 60 Hz until
+/// then.
+fn measure_refresh(transport: Rc<WebSocketTransport>, mut stamps: Vec<f64>) {
+    request_animation_frame(move || {
+        if let Some(now) = web_sys::window()
+            .and_then(|window| window.performance())
+            .map(|performance| performance.now())
+        {
+            stamps.push(now);
+        }
+        if stamps.len() < REFRESH_SAMPLES {
+            return measure_refresh(transport, stamps);
+        }
+        let deltas: Vec<f64> = stamps.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        let mut sorted = deltas.clone();
+        sorted.sort_by(f64::total_cmp);
+        let typical = sorted[sorted.len() / 2];
+        // The mean of the frames near the median: the median alone carries the
+        // callback's jitter, and a frame the page was too busy to take is a
+        // skipped refresh, not a slow screen.
+        let near: Vec<f64> = deltas
+            .into_iter()
+            .filter(|delta| (delta - typical).abs() < typical * 0.25)
+            .collect();
+        #[allow(clippy::cast_precision_loss)]
+        let interval = near.iter().sum::<f64>() / near.len() as f64;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let millihertz = (1_000_000.0 / interval).round() as u32;
+        if interval > 0.0
+            && let Ok(frame) = encode(&ClientMessage::RefreshRate { millihertz })
+        {
+            transport.send(&frame);
         }
     });
 }

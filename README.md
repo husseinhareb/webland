@@ -40,9 +40,12 @@ Every request needs the session token, kept in `$XDG_CONFIG_HOME/webland/token`
 (delete it to revoke; the next start makes a new one). The traffic is plain
 HTTP, so anywhere beyond localhost put a TLS proxy in front.
 
-Not there yet: HiDPI output scaling. [docs/roadmap.md](docs/roadmap.md)
-has the order of work, [docs/architecture.md](docs/architecture.md) the shape of
-the code.
+The browser's `devicePixelRatio` is the output's scale, fractional included:
+clients that honour it draw at the screen's density, and the rest (X ones
+among them) are enlarged by the browser.
+
+[docs/roadmap.md](docs/roadmap.md) has the order of work,
+[docs/architecture.md](docs/architecture.md) the shape of the code.
 
 ## Layout
 

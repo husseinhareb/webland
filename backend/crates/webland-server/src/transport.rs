@@ -482,6 +482,7 @@ mod tests {
             },
             parent: None,
             decorated: true,
+            scale: 120,
         });
         sink.emit(frame.clone());
 
@@ -605,6 +606,7 @@ mod tests {
                 },
                 parent: None,
                 decorated: true,
+                scale: 120,
             }));
             input
         });

@@ -96,7 +96,7 @@ use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes, TraversalAction,
-    get_children, with_surface_tree_downward,
+    get_children, send_surface_state, with_surface_tree_downward,
 };
 use smithay::wayland::dmabuf::{
     DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier, get_dmabuf,
@@ -118,6 +118,10 @@ use smithay::wayland::shell::xdg::decoration::{
     XdgDecorationHandler, XdgDecorationState,
 };
 use smithay::wayland::cursor_shape::CursorShapeManagerState;
+use smithay::wayland::fractional_scale::{
+    FractionalScaleHandler, FractionalScaleManagerState, with_fractional_scale,
+};
+use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::pointer_constraints::{
     PointerConstraint, PointerConstraintsHandler, PointerConstraintsState, with_pointer_constraint,
 };
@@ -132,7 +136,7 @@ use smithay::xwayland::{X11Surface, X11Wm, XWaylandClientData};
 use smithay::wayland::shm::{ShmHandler, ShmState, with_buffer_contents};
 use smithay::{
     delegate_compositor, delegate_cursor_shape, delegate_data_device, delegate_dmabuf,
-    delegate_output, delegate_pointer_constraints, delegate_primary_selection,
+    delegate_fractional_scale, delegate_output, delegate_viewporter, delegate_pointer_constraints, delegate_primary_selection,
     delegate_relative_pointer, delegate_seat, delegate_shm, delegate_xdg_decoration,
     delegate_xdg_shell, delegate_xwayland_shell,
 };
@@ -172,10 +176,15 @@ pub struct Webland {
     /// Set by the browser on connect: send whole surfaces on the next frame,
     /// because a joiner has nothing for a damage rectangle to land on.
     keyframe: bool,
+    /// How often frame callbacks fire: the browser's refresh, once it says.
+    frame_interval: std::time::Duration,
     /// The surface the browser last raised, which is where input goes.
     focus: Option<SurfaceId>,
-    /// The size to configure toplevels at, as the browser last reported it.
+    /// The size to configure toplevels at, as the browser last reported it,
+    /// in logical pixels: the browser's device pixels over `scale`.
     size: (i32, i32),
+    /// The browser's `devicePixelRatio`, which is the output's scale.
+    scale: f64,
     /// Send the launcher's list on the next pass.
     announce_applications: bool,
     /// Toplevels that asked the compositor to decorate them, and so must not be
@@ -257,6 +266,7 @@ impl XdgShellHandler for Webland {
         // Without this a client knows the output exists but not that it is on
         // it, which is the half of the answer GTK reads the scale from.
         self.output.enter(surface.wl_surface());
+        tell_scale(surface.wl_surface(), self.scale);
         surface.with_pending_state(|state| {
             state.size = Some((width, height).into());
             state.states.set(xdg_toplevel::State::Activated);
@@ -287,6 +297,7 @@ impl XdgShellHandler for Webland {
     /// the rectangle out. Nothing here constrains it to the screen: the browser
     /// knows where the parent window actually sits and the compositor does not.
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        tell_scale(surface.wl_surface(), self.scale);
         surface.with_pending_state(|state| {
             state.geometry = positioner.get_geometry();
         });
@@ -712,10 +723,7 @@ fn toplevel_for(
 
 /// Put an X window at a size, or back to the browser's when there is none.
 fn configure_x11(state: &Webland, window: &X11Surface, size: Option<Size>) {
-    #[allow(clippy::cast_possible_wrap)]
-    let (width, height) = size.map_or(state.size, |size| {
-        (size.width.max(1) as i32, size.height.max(1) as i32)
-    });
+    let (width, height) = size.map_or(state.size, |size| state.logical(size));
     if let Err(err) = window.configure(Rectangle::from_size((width, height).into())) {
         tracing::warn!(%err, "could not configure an X11 window");
     }
@@ -779,10 +787,14 @@ fn inject_input(
             // image was cut from: nothing for a client sent its whole buffer,
             // the shadow margin for one that was cropped to its window, which is
             // a pointer landing a margin's width from where it was pointed.
+            //
+            // And by the scale: the image is in the client's pixels, the point
+            // it is owed in logical ones.
             let (origin_x, origin_y) = image_origin(surface);
+            let scale = image_scale(surface, state.scale);
             let location = Point::from((
-                position.x + f64::from(origin_x),
-                position.y + f64::from(origin_y),
+                position.x / scale + f64::from(origin_x),
+                position.y / scale + f64::from(origin_y),
             ));
             let dx = location.x - state.pointer_location.x;
             let dy = location.y - state.pointer_location.y;
@@ -954,8 +966,9 @@ const INITIAL_FRAME_CREDIT: i32 = 2;
 /// sent, and no ack can arrive, a deadlock).
 const IDLE_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// The frame interval the pipe is sized against, 60Hz.
-const FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+/// The frame interval the pipe is sized against, and the tick until the
+/// browser measures its own (`ClientMessage::RefreshRate`): 60Hz.
+const FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_micros(16_667);
 
 /// The most frames allowed in flight, however long the round trip.
 ///
@@ -1169,12 +1182,18 @@ fn browser_output(dh: &DisplayHandle, size: (i32, i32)) -> Output {
         },
     );
     let _global = output.create_global::<Webland>(dh);
-    set_output_mode(&output, size);
+    set_output_mode(&output, size, 1.0);
     output
 }
 
-/// Point the output at a new size, as a monitor changing mode.
-fn set_output_mode(output: &Output, (width, height): (i32, i32)) {
+/// Point the output at a new size, as a monitor changing mode. The size is
+/// logical, as everything configured is; the mode is in device pixels.
+fn set_output_mode(output: &Output, (width, height): (i32, i32), scale: f64) {
+    #[allow(clippy::cast_possible_truncation)]
+    let (width, height) = (
+        (f64::from(width) * scale).round() as i32,
+        (f64::from(height) * scale).round() as i32,
+    );
     // 60 Hz in millihertz: a number clients divide by, not one anything here
     // paces to; the browser's acks are the real clock.
     let mode = Mode {
@@ -1184,7 +1203,7 @@ fn set_output_mode(output: &Output, (width, height): (i32, i32)) {
     output.change_current_state(
         Some(mode),
         Some(Transform::Normal),
-        Some(Scale::Integer(1)),
+        Some(Scale::Fractional(scale)),
         Some((0, 0).into()),
     );
     output.set_preferred(mode);
@@ -1322,11 +1341,15 @@ fn dmabuf_planes(surface: &WlSurface) -> Option<Planes> {
 
 /// Copy a surface's committed contents, tightly packed, whichever kind of buffer
 /// the client committed.
-fn capture(renderer: Option<&mut GlesRenderer>, surface: &WlSurface) -> Option<(Size, Vec<u8>)> {
+fn capture(
+    renderer: Option<&mut GlesRenderer>,
+    surface: &WlSurface,
+    scale: f64,
+) -> Option<(Size, Vec<u8>)> {
     // A client with subsurfaces has to be composited, which needs a renderer,
     // so under winit, which has none to spare here, such a window sends nothing.
     if !get_children(surface).is_empty() {
-        return capture_tree(renderer?, surface);
+        return capture_tree(renderer?, surface, scale);
     }
     match capture_shm(surface) {
         Some(captured) => Some(captured),
@@ -1370,10 +1393,13 @@ fn popup_anchor(
         .find(|popup| popup.wl_surface().id() == surface.id())?;
     let parent = known.get(&popup.get_parent_surface()?.id())?.id;
     let geometry = popup.with_pending_state(|state| state.geometry);
+    // In the browser's device pixels, which is what it places windows in.
+    #[allow(clippy::cast_possible_truncation)]
+    let device = |logical: i32| (f64::from(logical) * state.scale).round() as i32;
     Some(Anchor {
         parent,
-        x: geometry.loc.x,
-        y: geometry.loc.y,
+        x: device(geometry.loc.x),
+        y: device(geometry.loc.y),
     })
 }
 
@@ -1441,7 +1467,7 @@ fn image_origin(surface: &WlSurface) -> (i32, i32) {
 /// encoded, so a browser that drew the whole image would frame every window in
 /// black. Clamped to the image, because a client is free to declare a geometry
 /// larger than what it committed.
-fn content_rect(surface: &WlSurface, image: Size) -> Rect {
+fn content_rect(surface: &WlSurface, image: Size, scale: f64) -> Rect {
     let Some(geometry) = window_geometry(surface) else {
         return Rect {
             x: 0,
@@ -1451,11 +1477,31 @@ fn content_rect(surface: &WlSurface, image: Size) -> Rect {
         };
     };
     let origin = image_origin(surface);
+    #[allow(clippy::cast_possible_truncation)]
+    let pixels = |logical: i32| (f64::from(logical) * scale).round() as i32;
     clip(
-        (geometry.loc.x - origin.0, geometry.loc.y - origin.1),
-        (geometry.size.w, geometry.size.h),
+        (
+            pixels(geometry.loc.x - origin.0),
+            pixels(geometry.loc.y - origin.1),
+        ),
+        (pixels(geometry.size.w), pixels(geometry.size.h)),
         image,
     )
+}
+
+/// Image pixels per logical pixel: whatever the client drew at, for a surface
+/// sent as its own buffer, and the output's scale for one composited here.
+fn image_scale(surface: &WlSurface, scale: f64) -> f64 {
+    if !get_children(surface).is_empty() {
+        return scale;
+    }
+    with_renderer_surface_state(surface, |state| {
+        let buffer = state.buffer_size()?;
+        let shown = state.surface_size()?;
+        (shown.w > 0).then(|| f64::from(buffer.w * state.buffer_scale()) / f64::from(shown.w))
+    })
+    .flatten()
+    .unwrap_or(1.0)
 }
 
 /// The window rectangle as the browser can actually use it: inside the image,
@@ -1487,9 +1533,18 @@ fn clip(offset: (i32, i32), size: (i32, i32), image: Size) -> Rect {
 /// costs such a client the zero-copy path, landing it on the CPU encoder like an
 /// shm client. Rendering into one gbm-allocated dmabuf held across frames and
 /// handing the encoder its fds is the upgrade.
-fn capture_tree(renderer: &mut GlesRenderer, surface: &WlSurface) -> Option<(Size, Vec<u8>)> {
+///
+/// Rendered at `scale`, the output's, so the image is in the browser's device
+/// pixels whatever each surface in the tree drew at.
+fn capture_tree(
+    renderer: &mut GlesRenderer,
+    surface: &WlSurface,
+    scale: f64,
+) -> Option<(Size, Vec<u8>)> {
     let geometry = window_geometry(surface)?;
-    let (width, height) = (geometry.size.w, geometry.size.h);
+    #[allow(clippy::cast_possible_truncation)]
+    let device = |logical: i32| (f64::from(logical) * scale).round() as i32;
+    let (width, height) = (device(geometry.size.w), device(geometry.size.h));
     if width <= 0 || height <= 0 {
         return None;
     }
@@ -1498,8 +1553,8 @@ fn capture_tree(renderer: &mut GlesRenderer, surface: &WlSurface) -> Option<(Siz
         render_elements_from_surface_tree(
             renderer,
             surface,
-            (-geometry.loc.x, -geometry.loc.y),
-            1.0,
+            (device(-geometry.loc.x), device(-geometry.loc.y)),
+            scale,
             1.0,
             Kind::Unspecified,
         );
@@ -1517,7 +1572,7 @@ fn capture_tree(renderer: &mut GlesRenderer, surface: &WlSurface) -> Option<(Siz
         frame
             .clear(Color32F::new(0.0, 0.0, 0.0, 0.0), &damage)
             .ok()?;
-        draw_render_elements(&mut frame, 1.0, &elements, &damage).ok()?;
+        draw_render_elements(&mut frame, scale, &elements, &damage).ok()?;
         // Waited on, not dropped: the readback below must see finished pixels.
         frame.finish().ok()?.wait().ok()?;
     }
@@ -1733,7 +1788,15 @@ fn drain_client(
                     focus_changed = true;
                 }
             }
-            ClientMessage::Resize { size } => resize = Some(size),
+            ClientMessage::Resize { size, scale } => resize = Some((size, scale)),
+            // Outside 30 to 360 Hz is a measurement gone wrong, not a screen.
+            ClientMessage::RefreshRate { millihertz }
+                if (30_000..=360_000).contains(&millihertz) =>
+            {
+                state.frame_interval =
+                    std::time::Duration::from_nanos(1_000_000_000_000 / u64::from(millihertz));
+                tracing::info!(millihertz, "browser refresh rate");
+            }
             ClientMessage::CloseSurface { id } => closing.push(id),
             ClientMessage::Launch { id } => launching.push(id),
             ClientMessage::SetMaximized { id, size } => maximizing.push((id, size)),
@@ -1762,7 +1825,8 @@ fn drain_client(
             ClientMessage::TrayActivate { .. }
             | ClientMessage::TrayMenuOpen { .. }
             | ClientMessage::TrayMenuClick { .. }
-            | ClientMessage::NotificationClose { .. } => {}
+            | ClientMessage::NotificationClose { .. }
+            | ClientMessage::RefreshRate { .. } => {}
         }
     }
     if focus_changed {
@@ -1801,10 +1865,7 @@ fn drain_client(
         toplevel.with_pending_state(|pending| {
             // `None` leaves the size to the client, which is how it gets back
             // to whatever it was before being maximized.
-            #[allow(clippy::cast_possible_wrap)]
-            {
-                pending.size = size.map(|s| (s.width as i32, s.height as i32).into());
-            }
+            pending.size = size.map(|size| state.logical(size).into());
             if size.is_some() {
                 pending.states.set(xdg_toplevel::State::Maximized);
             } else {
@@ -1826,10 +1887,7 @@ fn drain_client(
             continue;
         };
         toplevel.with_pending_state(|pending| {
-            #[allow(clippy::cast_possible_wrap)]
-            {
-                pending.size = Some((size.width.max(1) as i32, size.height.max(1) as i32).into());
-            }
+            pending.size = Some(state.logical(size).into());
             pending.states.unset(xdg_toplevel::State::Maximized);
         });
         toplevel.send_configure();
@@ -1838,12 +1896,23 @@ fn drain_client(
     // Reconfigure every toplevel when the browser's window changes size. The
     // client redraws at the new size and the next capture picks it up, which is
     // what turns a browser resize into a sharp surface rather than a scaled one.
-    if let Some(size) = resize {
-        #[allow(clippy::cast_possible_wrap)]
-        let wanted = (size.width.max(1) as i32, size.height.max(1) as i32);
-        if state.size != wanted {
+    if let Some((size, scale)) = resize {
+        // Anything outside this is a browser reporting nonsense, not a screen.
+        let rescaled = (0.5..=8.0).contains(&scale) && (scale - state.scale).abs() > f64::EPSILON;
+        if rescaled {
+            state.scale = scale;
+            // Every surface's density in device pixels has changed, including
+            // one whose client ignores the scale and never redraws for it, so
+            // all of them are announced again.
+            state.keyframe = true;
+            for surface in streamed_surfaces(state) {
+                tell_scale(&surface, scale);
+            }
+        }
+        let wanted = state.logical(size);
+        if state.size != wanted || rescaled {
             state.size = wanted;
-            set_output_mode(&state.output, wanted);
+            set_output_mode(&state.output, wanted, state.scale);
             state.resize_x11();
             for toplevel in state.xdg_shell_state.toplevel_surfaces() {
                 toplevel.with_pending_state(|pending| {
@@ -2094,7 +2163,7 @@ fn stream_dirty(
         let mut pixels = None;
         let size = match &dmabuf {
             Some(planes) => planes.size,
-            None => match capture(renderer.as_deref_mut(), surface) {
+            None => match capture(renderer.as_deref_mut(), surface, state.scale) {
                 Some((size, captured)) if !captured.is_empty() => {
                     pixels = Some(captured);
                     size
@@ -2187,9 +2256,11 @@ fn stream_dirty(
             emit(ServerMessage::SurfaceCreated(SurfaceCreated {
                 id: tracked.id,
                 size,
-                content: content_rect(surface, size),
+                content: content_rect(surface, size, image_scale(surface, state.scale)),
                 parent: anchor,
                 decorated: !decorates_itself,
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                scale: (state.scale / image_scale(surface, state.scale) * 120.0).round() as u32,
             }));
         }
         // After `SurfaceCreated`, never before: the browser hangs a title on a
@@ -2251,9 +2322,9 @@ fn stream_dirty(
 
         // The encoder could not take this frame. Fall back to reading the buffer
         // back and deflating what changed, which works for anything.
-        let Some(pixels) = pixels
-            .or_else(|| capture(renderer.as_deref_mut(), surface).map(|(_, captured)| captured))
-        else {
+        let Some(pixels) = pixels.or_else(|| {
+            capture(renderer.as_deref_mut(), surface, state.scale).map(|(_, captured)| captured)
+        }) else {
             continue;
         };
         if pixels.is_empty() {
@@ -2425,6 +2496,10 @@ pub fn run_winit(
     // a picture the browser is never sent, so every application would be stuck
     // with the arrow the browser draws.
     let _cursor_shape = CursorShapeManagerState::new::<Webland>(&dh);
+    // How a client draws at a fractional scale: told the scale by the one,
+    // it renders that much bigger and shrinks it back to size by the other.
+    let _viewporter = ViewporterState::new::<Webland>(&dh);
+    let _fractional_scale = FractionalScaleManagerState::new::<Webland>(&dh);
     let relative_pointer_state = RelativePointerManagerState::new::<Webland>(&dh);
     let pointer_constraints_state = PointerConstraintsState::new::<Webland>(&dh);
     let data_device_state = DataDeviceState::new::<Webland>(&dh);
@@ -2452,8 +2527,10 @@ pub fn run_winit(
         x11: Vec::new(),
         seat,
         keyframe: false,
+        frame_interval: FRAME_INTERVAL,
         focus: None,
         size: configured_size(),
+        scale: 1.0,
         announce_applications: false,
         server_decorated: HashSet::new(),
         requests: Vec::new(),
@@ -2499,8 +2576,8 @@ pub fn run_winit(
     let env = spawn::Env::new(&socket_name, state.xdisplay, bus);
 
     if let Some(cmd) = std::env::var_os("WEBLAND_SPAWN") {
-        match env.command(&cmd).spawn() {
-            Ok(_) => tracing::info!(command = ?cmd, "spawned client"),
+        match spawn::start(&mut env.command(&cmd)) {
+            Ok(()) => tracing::info!(command = ?cmd, "spawned client"),
             Err(err) => tracing::warn!(command = ?cmd, %err, "failed to spawn client"),
         }
     }
@@ -2708,6 +2785,10 @@ pub fn run_headless(
     // a picture the browser is never sent, so every application would be stuck
     // with the arrow the browser draws.
     let _cursor_shape = CursorShapeManagerState::new::<Webland>(&dh);
+    // How a client draws at a fractional scale: told the scale by the one,
+    // it renders that much bigger and shrinks it back to size by the other.
+    let _viewporter = ViewporterState::new::<Webland>(&dh);
+    let _fractional_scale = FractionalScaleManagerState::new::<Webland>(&dh);
     let relative_pointer_state = RelativePointerManagerState::new::<Webland>(&dh);
     let pointer_constraints_state = PointerConstraintsState::new::<Webland>(&dh);
     let data_device_state = DataDeviceState::new::<Webland>(&dh);
@@ -2735,8 +2816,10 @@ pub fn run_headless(
         x11: Vec::new(),
         seat,
         keyframe: false,
+        frame_interval: FRAME_INTERVAL,
         focus: None,
         size: configured_size(),
+        scale: 1.0,
         announce_applications: false,
         server_decorated: HashSet::new(),
         requests: Vec::new(),
@@ -2782,8 +2865,8 @@ pub fn run_headless(
     let env = spawn::Env::new(&socket_name, state.xdisplay, bus);
 
     if let Some(cmd) = std::env::var_os("WEBLAND_SPAWN") {
-        match env.command(&cmd).spawn() {
-            Ok(_) => tracing::info!(command = ?cmd, "spawned client"),
+        match spawn::start(&mut env.command(&cmd)) {
+            Ok(()) => tracing::info!(command = ?cmd, "spawned client"),
             Err(err) => tracing::warn!(command = ?cmd, %err, "failed to spawn client"),
         }
     }
@@ -2816,9 +2899,17 @@ pub fn run_headless(
         // Paced work, once a frame however often the loop wakes: frame callbacks
         // (a client woken by each ack would outrun 60Hz) and the application
         // scan, which stats directories.
-        let tick = std::time::Instant::now() >= next_tick;
+        let now = std::time::Instant::now();
+        let tick = now >= next_tick;
         if tick {
-            next_tick = std::time::Instant::now() + FRAME_INTERVAL;
+            // On a fixed grid: counted from when the tick was due rather than
+            // when it ran, so waking late does not stretch every frame. A pass
+            // more than a frame behind starts the grid again instead of
+            // bursting to catch up.
+            next_tick += state.frame_interval;
+            if next_tick <= now {
+                next_tick = now + state.frame_interval;
+            }
             // An application installed or removed since the last pass: the
             // browser holds the listing, so it has to be told the new one.
             if applications.refresh() {
@@ -2876,6 +2967,42 @@ delegate_data_device!(Webland);
 delegate_primary_selection!(Webland);
 delegate_pointer_constraints!(Webland);
 delegate_relative_pointer!(Webland);
+delegate_viewporter!(Webland);
+delegate_fractional_scale!(Webland);
+
+impl FractionalScaleHandler for Webland {
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        tell_scale(&surface, self.scale);
+    }
+}
+
+impl Webland {
+    /// A size from the browser, in its device pixels, as the logical size a
+    /// client is configured at.
+    #[allow(clippy::cast_possible_truncation)]
+    fn logical(&self, size: Size) -> (i32, i32) {
+        let scaled = |pixels: u32| ((f64::from(pixels) / self.scale).round() as i32).max(1);
+        (scaled(size.width), scaled(size.height))
+    }
+}
+
+/// Tell a surface tree the scale to draw at: fractionally to a client that
+/// asked for that, and rounded up as a buffer scale to one that did not, which
+/// the browser then shrinks. Rounded down instead, it would be enlarged and
+/// soft.
+fn tell_scale(surface: &WlSurface, scale: f64) {
+    with_surface_tree_downward(
+        surface,
+        (),
+        |_, _, &()| TraversalAction::DoChildren(()),
+        |surface, states, &()| {
+            with_fractional_scale(states, |fractional| fractional.set_preferred_scale(scale));
+            #[allow(clippy::cast_possible_truncation)]
+            send_surface_state(surface, states, scale.ceil() as i32, Transform::Normal);
+        },
+        |_, _, &()| true,
+    );
+}
 
 #[cfg(test)]
 mod tests {
