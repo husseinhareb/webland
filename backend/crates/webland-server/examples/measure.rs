@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use webland_core::{Size, SurfaceId};
 use webland_protocol::{
     ClientMessage, Codec, ServerMessage, SurfaceFrame, decode, encode, inflate,
@@ -45,7 +46,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(10);
     let url = std::env::var("WEBLAND_WS_URL").unwrap_or_else(|_| "ws://127.0.0.1:9001".to_string());
 
-    let (mut socket, _) = tokio_tungstenite::connect_async(&url).await?;
+    // The server's token, from where it keeps it, presented as the browser does.
+    let config = std::env::var("XDG_CONFIG_HOME").map_or_else(
+        |_| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config"),
+        std::path::PathBuf::from,
+    );
+    let token = std::fs::read_to_string(config.join("webland/token"))?;
+    let mut request = url.into_client_request()?;
+    request
+        .headers_mut()
+        .insert("cookie", format!("webland_token={}", token.trim()).parse()?);
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await?;
     socket
         .send(Message::Binary(encode(&ClientMessage::RequestKeyframe)?))
         .await?;
